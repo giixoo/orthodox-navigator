@@ -1,0 +1,30 @@
+[package]
+name = "on"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/giixoo/orthodox-navigator"
+description = "Orthodox Navigator - a two-panel file manager in the spirit of DOS Navigator"
+
+[dependencies]
+crossterm = "0.28"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+encoding_rs = "0.8"
+trash = "5"
+dirs = "6"
+ctrlc = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
