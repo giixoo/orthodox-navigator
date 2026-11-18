@@ -216,6 +216,15 @@ fn parse_color(s: &str, base: (u8, u8, u8)) -> Option<C> {
     Some(C::Rgb(mix(digits[0], base.0), mix(digits[1], base.1), mix(digits[2], base.2)))
 }
 
+/// Difference in lightness of two colours, 0..1 (enough to read text: about 0.35 or more).
+fn contrast(a: C, b: C) -> f32 {
+    let l = |c: C| {
+        let (r, g, b) = c.rgb();
+        (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) / 255.0
+    };
+    (l(a) - l(b)).abs()
+}
+
 fn blend(a: C, b: C, t: f32) -> C {
     let (a, b) = (a.rgb(), b.rgb());
     let m = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t) as u8;
@@ -287,6 +296,8 @@ pub fn load(r: &ThemeRef, name: &str) -> Option<Theme> {
     let widget_fg = col(&["editorWidget.foreground", "foreground"]).unwrap_or(fg);
     let title_bg = col(&["titleBar.activeBackground", "editorGroupHeader.tabsBackground"]).unwrap_or(status_bg);
     let title_fg = col(&["titleBar.activeForeground", "tab.activeForeground"]).unwrap_or(fg);
+    // the info lines (file under the cursor, git branch, free space) stand out, like DN's cyan
+    let info = [accent, ty, fg].into_iter().find(|c| contrast(*c, panel_bg) >= 0.35).unwrap_or(fg);
 
     Some(Theme {
         name: Box::leak(name.to_string().into_boxed_str()),
@@ -307,7 +318,7 @@ pub fn load(r: &ThemeRef, name: &str) -> Option<Theme> {
         selected: warn,
         cursor_fg: sel_fg,
         cursor_bg: sel_bg,
-        info: dim,
+        info,
         status: warn,
         free_num: fg,
         free_label: dim,

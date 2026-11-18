@@ -4,6 +4,27 @@ All notable changes to Orthodox Navigator. The format follows [Keep a Changelog]
 and versions follow [Semantic Versioning](https://semver.org/). To release, add a section for the new version
 and push a tag `vX.Y.Z` (see "Install a release" in the README); the section becomes the release notes.
 
+## [Unreleased]
+
+## [0.4.0] - 2026-11-18
+
+### Added
+
+- Shift+↑ ↓ PgUp PgDn Home End (and ← → in the brief view) select the files the cursor passes over, like Insert;
+  starting on a selected file unselects instead.
+- macOS release: one universal binary (Apple silicon and Intel), alone or in a `.tar.gz` with the shell
+  function. CI also tests on macOS.
+
+### Changed
+
+- Developer tools:
+  - Settings are text boxes, number boxes and check boxes instead of one free-text field.
+  - Each tool keeps its own settings, remembered between runs (JWT secrets only until ON closes).
+  - The generators hide Input.
+- About shows the program's real version.
+- Preview folder summary and the panel's `git:` label: labels gray, values white (as on the free space line).
+- VS Code themes highlight the panel's info line (the file under the cursor) like the DN themes.
+
 ## [0.3.0] - 2026-11-18
 
 ### Added

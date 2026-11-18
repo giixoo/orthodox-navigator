@@ -1021,6 +1021,39 @@ impl App {
                 }
                 true
             }
+            // Shift+movement selects the files passed over (like Insert, in that direction)
+            KeyCode::Up if shift => {
+                p.select_by(-1, false);
+                true
+            }
+            KeyCode::Down if shift => {
+                p.select_by(1, false);
+                true
+            }
+            KeyCode::PageUp if shift => {
+                p.select_by(-page, false);
+                true
+            }
+            KeyCode::PageDown if shift => {
+                p.select_by(page, false);
+                true
+            }
+            KeyCode::Home if shift && cmd_empty => {
+                p.select_by(-(p.cursor as isize), true);
+                true
+            }
+            KeyCode::End if shift && cmd_empty => {
+                p.select_by(p.items.len() as isize, true);
+                true
+            }
+            KeyCode::Left if shift && cmd_empty => {
+                p.select_by(-step, false);
+                true
+            }
+            KeyCode::Right if shift && cmd_empty => {
+                p.select_by(step, false);
+                true
+            }
             KeyCode::Up => {
                 p.move_by(-1);
                 true
@@ -1173,7 +1206,7 @@ impl App {
             Cmd::UserScreen => self.user_screen(),
             Cmd::Quit => self.cmd_quit(),
             Cmd::Help => help::show(self, "panels"),
-            Cmd::About => dialogs::message(self, "About", "Orthodox Navigator\nprototype 0.2 (Rust)\n\nIn memory of DOS Navigator", false),
+            Cmd::About => dialogs::message(self, "About", &format!("Orthodox Navigator {}\n\nIn memory of DOS Navigator", env!("CARGO_PKG_VERSION")), false),
             Cmd::NextTheme => vscode::pick(self),
             Cmd::Calculator => {
                 if let Some(text) = calc::show(self) {

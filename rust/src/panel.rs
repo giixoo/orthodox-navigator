@@ -523,6 +523,32 @@ impl Panel {
         self.clamp();
     }
 
+    /// Shift+movement: select (or unselect) the files the cursor passes over, then move.
+    /// The first file decides: unselected -> select them all, selected -> unselect them all.
+    /// `to_edge` (Shift+Home / End) includes the file the cursor lands on.
+    pub fn select_by(&mut self, delta: isize, to_edge: bool) {
+        if self.items.is_empty() {
+            return;
+        }
+        let from = self.cursor;
+        let to = (from as isize + delta).clamp(0, self.items.len() as isize - 1) as usize;
+        let state = !self.items[from].selected || self.items[from].is_up;
+        // at the first / last file the cursor can't move, so that file itself is toggled
+        let (a, b) = if to == from || to_edge {
+            (from.min(to), from.max(to))
+        } else if to > from {
+            (from, to - 1)
+        } else {
+            (to + 1, from)
+        };
+        for e in &mut self.items[a..=b] {
+            if !e.is_up {
+                e.selected = state;
+            }
+        }
+        self.move_to(to);
+    }
+
     pub fn toggle_current(&mut self) {
         if let Some(e) = self.items.get_mut(self.cursor) {
             if !e.is_up {
@@ -698,10 +724,12 @@ impl Panel {
         let iwu = iw.max(0) as usize;
         // git branch, on the right of the separator line
         if let Some(b) = self.branch.as_ref().filter(|_| self.found.is_none()) {
-            let label = format!(" git: {} ", fit(b, iwu.saturating_sub(12).max(1)).trim_end());
-            let lx = x + w - 2 - label.chars().count() as i32;
+            // "git:" like a label, the branch like a value (the free space line's colours)
+            let name = format!("{} ", fit(b, iwu.saturating_sub(12).max(1)).trim_end());
+            let lx = x + w - 2 - 6 - name.chars().count() as i32;
             if lx > x + 1 {
-                s.text(lx, sep_y, &label, th.info, bg);
+                s.text(lx, sep_y, " git: ", th.free_label, bg);
+                s.text(lx + 6, sep_y, &name, th.free_num, bg);
             }
         }
 
@@ -814,5 +842,38 @@ impl Panel {
             s.text(x + 2, y + h - 1, &text, theme::current().bar_fg, theme::current().bar_bg);
             self.quick_pos = (x + 2 + text.chars().count() as i32 - 1, y + h - 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+
+    #[test]
+    fn shift_moves_select() {
+        let dir = std::env::temp_dir().join(format!("on-select-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a", "b", "c", "d", "e"] {
+            std::fs::write(dir.join(n), n).unwrap();
+        }
+        let mut p = Panel::new(dir.clone());
+        p.load(None);
+        let names = |p: &Panel| p.items.iter().filter(|e| e.selected).map(|e| e.name.clone()).collect::<Vec<_>>();
+        let first = p.items.iter().position(|e| e.name == "a").unwrap();
+        p.move_to(first);
+        p.select_by(1, false); // a, cursor on b
+        p.select_by(1, false); // b, cursor on c
+        assert_eq!(names(&p), ["a", "b"]);
+        p.select_by(-1, false); // c is not selected: selects c, back to b
+        assert_eq!(names(&p), ["a", "b", "c"]);
+        p.select_by(-1, false); // b is selected: unselects it, on a
+        assert_eq!(names(&p), ["a", "c"]);
+        p.select_by(100, true); // Shift+End: a .. e by a's state (selected -> unselect all)
+        assert!(names(&p).is_empty());
+        assert_eq!(p.items[p.cursor].name, "e");
+        p.select_by(1, false); // at the last file: toggles it
+        assert_eq!(names(&p), ["e"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

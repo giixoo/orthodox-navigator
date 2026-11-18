@@ -33,9 +33,9 @@ fn time_text(t: std::io::Result<std::time::SystemTime>) -> String {
 }
 
 fn folder_info(p: &Path) -> Vec<String> {
-    let mut v = vec![format!("Folder   {}", p.display())];
+    let mut v = vec![format!("Folder\t{}", p.display())];
     if let Ok(m) = fs::metadata(p) {
-        v.push(format!("Modified {}", time_text(m.modified())));
+        v.push(format!("Modified\t{}", time_text(m.modified())));
     }
     match fs::read_dir(p) {
         Ok(rd) => {
@@ -53,10 +53,10 @@ fn folder_info(p: &Path) -> Vec<String> {
                 }
             }
             v.push(String::new());
-            v.push(format!("Folders  {}", n0(dirs)));
-            v.push(format!("Files    {}  ({} bytes, {})", n0(files), n0(bytes), human(bytes)));
+            v.push(format!("Folders\t{}", n0(dirs)));
+            v.push(format!("Files\t{}  ({} bytes, {})", n0(files), n0(bytes), human(bytes)));
             if hidden > 0 {
-                v.push(format!("Hidden   {}", n0(hidden)));
+                v.push(format!("Hidden\t{}", n0(hidden)));
             }
             v.push(String::new());
             v.push("Sizes of files directly inside; F3 on the".into());
@@ -66,7 +66,7 @@ fn folder_info(p: &Path) -> Vec<String> {
     }
     if let Some(b) = crate::git::branch(p) {
         v.push(String::new());
-        v.push(format!("Git branch {b}"));
+        v.push(format!("Git branch\t{b}"));
     }
     v
 }
@@ -85,8 +85,8 @@ impl Preview {
         self.left = 0;
         self.content = Some(match entry {
             Some(e) if in_archive => Content::Info(vec![
-                format!("Name     {}", e.name),
-                format!("Size     {} bytes", n0(e.size.unwrap_or(0))),
+                format!("Name\t{}", e.name),
+                format!("Size\t{} bytes", n0(e.size.unwrap_or(0))),
                 String::new(),
                 "Inside an archive: F3 to view it.".into(),
             ]),
@@ -155,8 +155,19 @@ impl Preview {
                 s.text(x + w - il - 2, y + h - 1, &info, t.frame, t.panel_bg);
             }
             Some(Content::Info(lines)) => {
+                // "label<TAB>value": labels gray, values white (the colours of the free space line);
+                // lines without a tab are notes, in the label colour
+                let lw = lines.iter().filter_map(|l| l.split_once('\t')).map(|(a, _)| a.chars().count()).max().unwrap_or(0) + 1;
+                let room = (iw - 2).max(0) as usize;
                 for (i, l) in lines.iter().enumerate().take(ih.max(0) as usize) {
-                    s.text(x + 2, y + 1 + i as i32, &fit(l, (iw - 2).max(0) as usize), t.info, t.panel_bg);
+                    let ly = y + 1 + i as i32;
+                    match l.split_once('\t') {
+                        Some((label, value)) => {
+                            s.text(x + 2, ly, &fit(label, lw.min(room)), t.free_label, t.panel_bg);
+                            s.text(x + 2 + lw as i32, ly, &fit(value, room.saturating_sub(lw)), t.free_num, t.panel_bg);
+                        }
+                        None => s.text(x + 2, ly, &fit(l, room), t.free_label, t.panel_bg),
+                    }
                 }
             }
             None => {}

@@ -70,7 +70,7 @@ pub static BLUE: Theme = Theme {
     file: LightCyan, dir: White, up: White, exec: LightGreen, archive: LightMagenta,
     doc: LightCyan, image: LightCyan, hidden: Cyan, junk: LightGray,
     selected: Yellow, cursor_fg: Black, cursor_bg: Cyan,
-    info: LightCyan, status: Yellow, free_num: LightCyan, free_label: LightCyan, error: LightRed,
+    info: LightCyan, status: Yellow, free_num: White, free_label: LightCyan, error: LightRed,
     title_fg: LightCyan, title_bg: Blue, active_title_fg: Black, active_title_bg: Cyan,
     scroll_fg: Black, scroll_bg: Cyan, drive_fg: LightCyan, drive_cur: Yellow,
 
