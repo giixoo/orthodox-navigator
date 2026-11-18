@@ -1,11 +1,10 @@
-# Build, test and lint on every push and pull request (Windows and Linux).
+# Build, test and lint pushes to main and pull requests (Windows and Linux).
 
 name: CI
 
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["**"]
+    branches: [main]
   pull_request:
 
 env:
