@@ -213,7 +213,7 @@ fn draw(s: &mut Screen, g: &Game, best: u64) {
     let x = ((s.w - w) / 2).max(0);
     let y = ((s.h - h) / 2).max(0);
     let bg = t.dlg_bg;
-    dialogs::frame_at(s, x, y, w, h, "Falling Blocks");
+    dialogs::frame_at(s, x, y, w, h, "Orthodox game");
 
     // the well
     let (fx, fy) = (x + 3, y + 2);
@@ -260,7 +260,7 @@ fn draw(s: &mut Screen, g: &Game, best: u64) {
     s.text(sx, fy + 18, "←→ move  ↑ rotate", t.dlg_fg, bg);
     s.text(sx, fy + 19, "↓ faster  Space drop", t.dlg_fg, bg);
     s.cursor = None;
-    draw_key_bar(s, &["Help", "New", "Pause", "", "", "", "", "", "", "Quit"]);
+    draw_key_bar(s, &["Help", "New", "Pause", "", "", "", "", "", "", ""]);
 }
 
 pub fn show(app: &mut App) {
@@ -269,28 +269,23 @@ pub fn show(app: &mut App) {
     let mut next_tick = Instant::now() + g.speed();
     loop {
         let wait = if g.over || g.paused { None } else { Some(next_tick.saturating_duration_since(Instant::now())) };
-        let input = app.modal_input(&mut |s| draw(s, &g, best), wait);
+        let input = app.window_input(&mut |s| draw(s, &g, best), wait);
         match input {
             Input::Tick => {
                 g.step();
                 next_tick = Instant::now() + g.speed();
             }
             Input::Key(k) => match k.code {
-                KeyCode::Esc | KeyCode::F(10) => break,
+                KeyCode::Esc => break,
                 KeyCode::F(2) => {
                     g = Game::new(seed());
                     next_tick = Instant::now() + g.speed();
                 }
-                KeyCode::F(3) | KeyCode::Char('p') | KeyCode::Char('P') if !g.over => {
+                KeyCode::F(3) if !g.over => {
                     g.paused = !g.paused;
                     next_tick = Instant::now() + g.speed();
                 }
-                KeyCode::F(1) => dialogs::message(
-                    app,
-                    "Falling Blocks",
-                    "Fill whole rows to clear them.\n\n←/→ move   ↑ rotate   ↓ faster\nSpace drop   F3 pause   F2 new game",
-                    false,
-                ),
+                KeyCode::F(1) => crate::help::show(app, "game"),
                 _ if g.over || g.paused => {}
                 KeyCode::Left => {
                     g.shift(-1, 0);

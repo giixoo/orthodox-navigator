@@ -17,6 +17,13 @@ struct Node {
     name: String,
     depth: usize,
     expanded: bool,
+    /// has sub-folders (shows [+] / [-])
+    has_kids: bool,
+}
+
+/// Does p contain at least one folder? (stops at the first one)
+fn has_subdirs(p: &Path) -> bool {
+    fs::read_dir(p).map(|rd| rd.flatten().any(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))).unwrap_or(false)
 }
 
 fn subdirs(p: &Path) -> Vec<PathBuf> {
@@ -44,7 +51,7 @@ impl Tree {
     /// Build the tree from the root of `start`'s drive, expanded down to `start`.
     fn new(start: &Path) -> Self {
         let root = start.ancestors().last().unwrap_or(start).to_path_buf();
-        let mut t = Tree { nodes: vec![Node { name: name_of(&root), path: root, depth: 0, expanded: false }], cursor: 0, top: 0 };
+        let mut t = Tree { nodes: vec![Node { name: name_of(&root), has_kids: true, path: root, depth: 0, expanded: false }], cursor: 0, top: 0 };
         let mut i = 0;
         let chain: Vec<&Path> = start.ancestors().collect::<Vec<_>>().into_iter().rev().skip(1).collect();
         for want in chain {
@@ -66,8 +73,9 @@ impl Tree {
         let depth = self.nodes[i].depth + 1;
         let kids: Vec<Node> = subdirs(&self.nodes[i].path)
             .into_iter()
-            .map(|p| Node { name: name_of(&p), path: p, depth, expanded: false })
+            .map(|p| Node { name: name_of(&p), has_kids: has_subdirs(&p), path: p, depth, expanded: false })
             .collect();
+        self.nodes[i].has_kids = !kids.is_empty();
         self.nodes.splice(i + 1..i + 1, kids);
     }
 
@@ -116,6 +124,26 @@ impl Tree {
         parts.concat()
     }
 
+    /// [+] can be expanded, [-] can be collapsed, nothing for a folder without sub-folders.
+    fn marker(&self, i: usize) -> &'static str {
+        let n = &self.nodes[i];
+        if !n.has_kids {
+            "    "
+        } else if n.expanded {
+            "[-] "
+        } else {
+            "[+] "
+        }
+    }
+
+    fn toggle(&mut self, i: usize) {
+        if self.nodes[i].expanded {
+            self.collapse(i);
+        } else {
+            self.expand(i);
+        }
+    }
+
     fn clamp(&mut self, rows: usize) {
         self.cursor = self.cursor.min(self.nodes.len().saturating_sub(1));
         if self.cursor < self.top {
@@ -138,7 +166,7 @@ pub fn show(app: &mut App, start: &Path) -> Option<PathBuf> {
         let rows = (h - 4).max(1) as usize;
         t.clamp(rows);
         let tr = &t;
-        let input = app.modal_input(
+        let input = app.window_input(
             &mut |s: &mut Screen| {
                 let th = theme::current();
                 dialogs::frame_at(s, x, y, w, h, "Directory tree");
@@ -150,21 +178,24 @@ pub fn show(app: &mut App, start: &Path) -> Option<PathBuf> {
                     let i = tr.top + r;
                     let Some(n) = tr.nodes.get(i) else { break };
                     let cur = i == tr.cursor;
-                    let line = format!("{}{}", tr.prefix(i), n.name);
+                    let prefix = format!("{}{}", tr.prefix(i), tr.marker(i));
+                    let line = format!("{prefix}{}", n.name);
                     let (fg, bg) = if cur { (th.cursor_fg, th.cursor_bg) } else { (th.dir, th.panel_bg) };
                     s.text(x + 4, y + 2 + r as i32, &fit(&line, (w - 8) as usize), fg, bg);
                     if !cur {
-                        s.text(x + 4, y + 2 + r as i32, &tr.prefix(i), th.frame, th.panel_bg);
+                        // recolour only the tree lines; `fit` would pad with spaces over the name
+                        let lines: String = prefix.chars().take((w - 8).max(0) as usize).collect();
+                        s.text(x + 4, y + 2 + r as i32, &lines, th.frame, th.panel_bg);
                     }
                 }
                 s.cursor = None;
-                draw_key_bar(s, &["Help", "", "", "", "", "", "", "", "", "Cancel"]);
+                draw_key_bar(s, &["Help", "", "", "", "", "", "", "", "", ""]);
             },
             None,
         );
         match input {
             Input::Key(k) => match k.code {
-                KeyCode::Esc | KeyCode::F(10) => return None,
+                KeyCode::Esc => return None,
                 KeyCode::Enter => return Some(t.nodes[t.cursor].path.clone()),
                 KeyCode::Up => t.cursor = t.cursor.saturating_sub(1),
                 KeyCode::Down => t.cursor += 1,
@@ -188,7 +219,7 @@ pub fn show(app: &mut App, start: &Path) -> Option<PathBuf> {
                         t.cursor = p;
                     }
                 }
-                KeyCode::F(1) => dialogs::message(app, "Directory tree", "↑↓ move   → expand   ← collapse\nEnter go to folder   Esc cancel", false),
+                KeyCode::F(1) => crate::help::show(app, "tree"),
                 _ => {}
             },
             Input::Mouse(m) => {
@@ -198,6 +229,13 @@ pub fn show(app: &mut App, start: &Path) -> Option<PathBuf> {
                     MouseEventKind::ScrollDown => t.cursor += 3,
                     MouseEventKind::Down(MouseButton::Left) if mx > x + 2 && mx < x + w - 3 && my >= y + 2 && my < y + 2 + rows as i32 => {
                         let i = t.top + (my - y - 2) as usize;
+                        // a click on [+] / [-] expands / collapses
+                        let mark_x = x + 4 + t.prefix(i.min(t.nodes.len().saturating_sub(1))).chars().count() as i32;
+                        if i < t.nodes.len() && t.nodes[i].has_kids && (mark_x..mark_x + 3).contains(&mx) {
+                            t.cursor = i;
+                            t.toggle(i);
+                            continue;
+                        }
                         if i < t.nodes.len() {
                             let double = last_click.is_some_and(|(at, j)| j == i && at.elapsed().as_millis() < 400);
                             t.cursor = i;
@@ -207,11 +245,11 @@ pub fn show(app: &mut App, start: &Path) -> Option<PathBuf> {
                             last_click = Some((Instant::now(), i));
                         }
                     }
-                    MouseEventKind::Down(MouseButton::Right) => return None,
+                    MouseEventKind::Down(MouseButton::Left) if dialogs::is_close_click(x, y, mx, my) => return None,
                     _ => {}
                 }
             }
-            Input::Tick => {}
+            Input::Tick | Input::Paste(_) => {}
         }
     }
 }

@@ -5,12 +5,46 @@ use crossterm::{cursor, execute, terminal};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
-/// The 16 classic DOS text-mode colours.
+/// The 16 classic DOS text-mode colours, or any 24-bit colour (VS Code themes).
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum C {
     Black, Blue, Green, Cyan, Red, Magenta, Brown, LightGray,
     DarkGray, LightBlue, LightGreen, LightCyan, LightRed, LightMagenta, Yellow, White,
+    Rgb(u8, u8, u8),
+}
+
+const NAMED: [C; 16] = [
+    C::Black, C::Blue, C::Green, C::Cyan, C::Red, C::Magenta, C::Brown, C::LightGray,
+    C::DarkGray, C::LightBlue, C::LightGreen, C::LightCyan, C::LightRed, C::LightMagenta, C::Yellow, C::White,
+];
+
+impl C {
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            C::Rgb(r, g, b) => (r, g, b),
+            named => VGA[NAMED.iter().position(|&n| n == named).unwrap_or(7)],
+        }
+    }
+
+    /// The nearest of the 16 colours (for terminals without 24-bit colour).
+    fn index16(self) -> usize {
+        if let Some(i) = NAMED.iter().position(|&n| n == self) {
+            return i;
+        }
+        let (r, g, b) = self.rgb();
+        let dist = |&(vr, vg, vb): &(u8, u8, u8)| {
+            let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+            d(r, vr) + d(g, vg) + d(b, vb)
+        };
+        (0..16).min_by_key(|&i| dist(&VGA[i])).unwrap_or(7)
+    }
+
+    /// The same colour made darker (for shadows over 24-bit colours).
+    pub fn darker(self) -> C {
+        let (r, g, b) = self.rgb();
+        C::Rgb(r / 3, g / 3, b / 3)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,6 +65,14 @@ const VGA: [(u8, u8, u8); 16] = [
 /// DOS colour index -> ANSI colour index.
 const ANSI: [u8; 8] = [0, 4, 2, 6, 1, 5, 3, 7];
 
+/// A copy of a frame, to draw dialogs over (see App::over).
+#[derive(Clone)]
+pub struct Snapshot {
+    w: i32,
+    h: i32,
+    cells: Vec<Cell>,
+}
+
 pub struct Screen {
     pub w: i32,
     pub h: i32,
@@ -44,16 +86,19 @@ pub struct Screen {
 pub fn restore_terminal() {
     let mut out = io::stdout();
     let _ = write!(out, "\x1b[0m");
+    #[cfg(not(windows))]
+    let _ = execute!(out, crossterm::event::DisableBracketedPaste);
     let _ = execute!(out, crossterm::event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
 }
 
-fn push_color(out: &mut String, truecolor: bool, fg: usize, bg: usize) {
+fn push_color(out: &mut String, truecolor: bool, fg: C, bg: C) {
     if truecolor {
-        let (fr, fgc, fb) = VGA[fg];
-        let (br, bgc, bb) = VGA[bg];
+        let (fr, fgc, fb) = fg.rgb();
+        let (br, bgc, bb) = bg.rgb();
         let _ = write!(out, "\x1b[38;2;{fr};{fgc};{fb};48;2;{br};{bgc};{bb}m");
     } else {
+        let (fg, bg) = (fg.index16(), bg.index16());
         let f = if fg < 8 { 30 + ANSI[fg] } else { 90 + ANSI[fg - 8] };
         let b = if bg < 8 { 40 + ANSI[bg] } else { 100 + ANSI[bg - 8] };
         let _ = write!(out, "\x1b[{f};{b}m");
@@ -79,6 +124,8 @@ impl Screen {
         crate::platform::enable_vt();
         terminal::enable_raw_mode()?;
         execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide, crossterm::event::EnableMouseCapture)?;
+        #[cfg(not(windows))]
+        execute!(io::stdout(), crossterm::event::EnableBracketedPaste)?;
         self.full = true;
         Ok(())
     }
@@ -94,6 +141,20 @@ impl Screen {
 
     pub fn resume(&mut self) {
         let _ = self.init();
+    }
+
+    /// The frame drawn so far.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot { w: self.w, h: self.h, cells: self.buf.clone() }
+    }
+
+    /// Start a frame from a snapshot; false if the screen size has changed since.
+    pub fn restore(&mut self, s: &Snapshot) -> bool {
+        if s.w != self.w || s.h != self.h || s.cells.len() != self.buf.len() {
+            return false;
+        }
+        self.buf.copy_from_slice(&s.cells);
+        true
     }
 
     /// Re-read the terminal size; returns true if it changed.
@@ -163,8 +224,13 @@ impl Screen {
                 return;
             }
             let c = &mut self.buf[(cy * self.w + cx) as usize];
-            c.fg = C::DarkGray;
-            c.bg = C::Black;
+            if let C::Rgb(..) = c.bg {
+                c.fg = c.fg.darker();
+                c.bg = c.bg.darker();
+            } else {
+                c.fg = C::DarkGray;
+                c.bg = C::Black;
+            }
         };
         for j in 1..=h {
             dim(x + w, y + j);
@@ -177,7 +243,7 @@ impl Screen {
 
     pub fn flush(&mut self) {
         let mut out = String::with_capacity((self.w * self.h * 2) as usize);
-        let (mut cf, mut cb) = (usize::MAX, usize::MAX);
+        let mut cur: Option<(C, C)> = None;
         let (mut cx, mut cy) = (-1, -1);
         for y in 0..self.h {
             for x in 0..self.w {
@@ -189,10 +255,9 @@ impl Screen {
                 if cx != x || cy != y {
                     let _ = write!(out, "\x1b[{};{}H", y + 1, x + 1);
                 }
-                if c.fg as usize != cf || c.bg as usize != cb {
-                    push_color(&mut out, self.truecolor, c.fg as usize, c.bg as usize);
-                    cf = c.fg as usize;
-                    cb = c.bg as usize;
+                if cur != Some((c.fg, c.bg)) {
+                    push_color(&mut out, self.truecolor, c.fg, c.bg);
+                    cur = Some((c.fg, c.bg));
                 }
                 out.push(if c.ch == '\0' { ' ' } else { c.ch });
                 cx = x + 1;

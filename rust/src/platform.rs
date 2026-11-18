@@ -9,6 +9,40 @@ pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Shift / Ctrl / Alt held right now. Terminals don't report a modifier pressed on its own,
+/// so on Windows we read the keyboard; elsewhere this is unknown (none).
+pub fn modifiers() -> crossterm::event::KeyModifiers {
+    use crossterm::event::KeyModifiers as M;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        let down = |vk: i32| (unsafe { GetAsyncKeyState(vk) } as u16) & 0x8000 != 0;
+        let mut m = M::NONE;
+        if down(0x10) {
+            m |= M::SHIFT;
+        }
+        if down(0x11) {
+            m |= M::CONTROL;
+        }
+        if down(0x12) {
+            m |= M::ALT;
+        }
+        m
+    }
+    #[cfg(not(windows))]
+    M::NONE
+}
+
+/// The system's double-click time in milliseconds.
+pub fn double_click_ms() -> u128 {
+    #[cfg(windows)]
+    {
+        (unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() } as u128).max(300)
+    }
+    #[cfg(not(windows))]
+    500
+}
+
 pub fn default_shell() -> String {
     if cfg!(windows) {
         "cmd.exe".into()
@@ -217,4 +251,41 @@ pub fn run_file(shell: &str, name: &str) -> String {
     } else {
         format!("./{}", quote(shell, name).trim_start_matches("./"))
     }
+}
+
+/// Put text on the Windows clipboard. Returns false where there is none (other systems use OSC 52).
+#[cfg(windows)]
+pub fn set_clipboard(text: &str) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: standard clipboard sequence; the memory belongs to the clipboard once SetClipboardData succeeds
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+        let mut ok = false;
+        if !h.is_null() {
+            let p = GlobalLock(h) as *mut u16;
+            if !p.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+                GlobalUnlock(h);
+                ok = !SetClipboardData(CF_UNICODETEXT, h).is_null();
+            }
+            if !ok {
+                GlobalFree(h);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_clipboard(_text: &str) -> bool {
+    false
 }

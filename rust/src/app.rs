@@ -3,23 +3,33 @@
 use crate::archive;
 use crate::calc;
 use crate::dialogs::{self, LineEdit};
+use crate::diff;
+use crate::editor;
+use crate::favorites;
 use crate::fileops;
+use crate::find;
 use crate::game;
+use crate::help;
+use crate::sysmon;
+use crate::git;
 use crate::menu;
 use crate::panel::{self, Panel, SortMode, ViewMode};
 use crate::platform;
-use crate::screen::Screen;
+use crate::preview::Preview;
+use crate::screen::{Screen, Snapshot};
 use crate::theme;
+use crate::tools;
 use crate::tree;
-use crate::util::{fit, fit_left, human, normalize, same_path, wildcard};
+use crate::util::{fit, fit_left, normalize, same_path, wildcard};
 use crate::viewer;
+use crate::vscode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::terminal;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 pub const MAX_PANELS: usize = 2;
@@ -37,6 +47,8 @@ pub enum Cmd {
     Tree,
     View,
     Edit,
+    NewFile,
+    AddFavorite,
     Copy,
     Move,
     Rename,
@@ -56,17 +68,24 @@ pub enum Cmd {
     NextTheme,
     Calculator,
     Game,
-    NewPanel,
-    ClosePanel,
+    SysMon,
+    TogglePanel,
     Wider,
     Narrower,
     EqualWidths,
+    Preview,
+    Tools,
+    CompareFiles,
+    GitDiff,
+    Find,
 }
 
 /// One thing that happened while a screen was waiting.
 pub enum Input {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    /// Text pasted into the terminal (bracketed paste; not on Windows, where it arrives as keys).
+    Paste(String),
     /// The timeout given to `modal_input` ran out.
     Tick,
 }
@@ -84,6 +103,9 @@ pub struct App {
     active: usize,
     prev: usize,
     cmd: LineEdit,
+    /// The panel Ctrl+P hid: (where it was, the panel, its width share)
+    hidden_panel: Option<(usize, Panel, f64)>,
+    hist: crate::history::History,
     quick: Option<String>,
     quit: bool,
     // shell integration (see shell/on.ps1 and shell/on.sh)
@@ -99,6 +121,18 @@ pub struct App {
     drag: Option<usize>,
     init: Vec<PanelInit>,
     host_relaunch: bool,
+    /// Ctrl+L: the other panel shows a preview of the item under the cursor.
+    preview: Option<Preview>,
+    /// screens that dialogs are drawn over (the window that opened them), innermost last
+    backdrops: Vec<Option<Snapshot>>,
+    /// the last frame drawn at each dialog depth (0 = no dialog open)
+    /// (None: the panels or a menu, which dialogs redraw live)
+    frames: Vec<Option<Snapshot>>,
+    /// set by window_input: the next frame is a window that dialogs should be drawn over
+    window_frame: bool,
+    /// a command was typed on the user screen (Ctrl+O): come back to it after the shell runs it
+    resume_user: bool,
+    last_find: find::Query,
 }
 
 fn state_file() -> Option<PathBuf> {
@@ -150,21 +184,119 @@ pub fn draw_clock(s: &mut Screen) {
     s.text(s.w - clock.chars().count() as i32, 0, &clock, t.clock_fg, t.clock_bg);
 }
 
-/// DN-style key bar: "F1 Help  F2 ...  F10 Menu". Clicking a slot presses that key.
-pub fn draw_key_bar(s: &mut Screen, labels: &[&str; 10]) {
-    let t = theme::current();
-    let y = s.h - 1;
-    let slot = s.w / 10;
-    s.fill(0, y, s.w, 1, ' ', t.key_label, t.key_bg);
-    for (i, label) in labels.iter().enumerate() {
-        let x = i as i32 * slot;
-        let n = format!("F{}", i + 1);
-        let w = if i == 9 { s.w - x } else { slot } - n.len() as i32;
-        s.text(x, y, &n, t.key_num, t.key_bg);
-        s.text(x + n.len() as i32, y, &fit(&format!(" {label}"), w.max(0) as usize), t.key_label, t.key_bg);
-    }
+/// Modifier keys held right now, as last seen by `modal_input` (Windows only; elsewhere always none).
+static MODS: AtomicU8 = AtomicU8::new(0);
+
+pub fn held_modifiers() -> KeyModifiers {
+    KeyModifiers::from_bits_truncate(MODS.load(Ordering::Relaxed))
 }
 
+/// The panels' shortcuts besides the F-keys, most useful first (the key bar shows as many as fit).
+/// Without a modifier it lists Ctrl shortcuts too, so they can be found (and clicked).
+const PANEL_EXTRAS: [Extra; 25] = {
+    const N: KeyModifiers = KeyModifiers::NONE;
+    const C: KeyModifiers = KeyModifiers::CONTROL;
+    const A: KeyModifiers = KeyModifiers::ALT;
+    [
+        Extra { mods: N, key: "^L", label: "Preview", code: KeyCode::Char('l') },
+        Extra { mods: N, key: "^P", label: "Panels", code: KeyCode::Char('p') },
+        Extra { mods: N, key: "^O", label: "Screen", code: KeyCode::Char('o') },
+        Extra { mods: N, key: "^E", label: "History", code: KeyCode::Char('e') },
+        Extra { mods: N, key: "^B", label: "View", code: KeyCode::Char('b') },
+        Extra { mods: N, key: "^R", label: "Reread", code: KeyCode::Char('r') },
+        Extra { mods: N, key: "^T", label: "Theme", code: KeyCode::Char('t') },
+        Extra { mods: N, key: "^G", label: "Game", code: KeyCode::Char('g') },
+        Extra { mods: C, key: "L", label: "Preview", code: KeyCode::Char('l') },
+        Extra { mods: C, key: "P", label: "Panels", code: KeyCode::Char('p') },
+        Extra { mods: C, key: "O", label: "Screen", code: KeyCode::Char('o') },
+        Extra { mods: C, key: "E", label: "History", code: KeyCode::Char('e') },
+        Extra { mods: C, key: "B", label: "View", code: KeyCode::Char('b') },
+        Extra { mods: C, key: "R", label: "Reread", code: KeyCode::Char('r') },
+        Extra { mods: C, key: "H", label: "Hidden", code: KeyCode::Char('h') },
+        Extra { mods: C, key: "U", label: "Swap", code: KeyCode::Char('u') },
+        Extra { mods: C, key: "T", label: "Theme", code: KeyCode::Char('t') },
+        Extra { mods: C, key: "D", label: "Fav", code: KeyCode::Char('d') },
+        Extra { mods: C, key: "G", label: "Game", code: KeyCode::Char('g') },
+        Extra { mods: C, key: "Ins", label: "Copy", code: KeyCode::Insert },
+        Extra { mods: C, key: "Enter", label: "Name", code: KeyCode::Enter },
+        Extra { mods: C, key: "[", label: "LPath", code: KeyCode::Char('[') },
+        Extra { mods: C, key: "]", label: "RPath", code: KeyCode::Char(']') },
+        Extra { mods: C, key: "\\", label: "Root", code: KeyCode::Char('\\') },
+        Extra { mods: A, key: "X", label: "Quit", code: KeyCode::Char('x') },
+    ]
+};
+
+/// Key bar labels for no modifier, Shift, Ctrl and Alt.
+pub type KeyBar<'a> = [(KeyModifiers, [&'a str; 10])];
+
+/// One shortcut on the key bar besides the F-keys: shown as `key label`, clicking it presses `code` + `mods`.
+pub struct Extra {
+    pub mods: KeyModifiers,
+    pub key: &'static str,
+    pub label: &'static str,
+    pub code: KeyCode,
+}
+
+/// Where each key bar item was last drawn: (from x, to x, the key it presses).
+static KEY_BAR_HITS: std::sync::Mutex<Vec<(i32, i32, KeyEvent)>> = std::sync::Mutex::new(Vec::new());
+
+/// The key a click at column x of the key bar presses, if any.
+pub fn key_bar_hit(x: i32) -> Option<KeyEvent> {
+    KEY_BAR_HITS.lock().ok()?.iter().find(|(a, b, _)| x >= *a && x < *b).map(|h| h.2)
+}
+
+/// DN-style key bar with one label set; shows nothing while a modifier is held.
+pub fn draw_key_bar(s: &mut Screen, labels: &[&str; 10]) {
+    draw_key_bars(s, &[(KeyModifiers::NONE, *labels)]);
+}
+
+/// Key bar that follows the held modifiers: hold Shift / Ctrl / Alt to see what F-keys do with it.
+/// Clicking an item presses that key (with the held modifiers).
+pub fn draw_key_bars(s: &mut Screen, sets: &KeyBar) {
+    draw_key_bars_with(s, sets, &[]);
+}
+
+/// Key bar: the F-keys that do something with the held modifiers first, then the other shortcuts
+/// for those modifiers, as many as fit. Spare width is shared out between the items.
+pub fn draw_key_bars_with(s: &mut Screen, sets: &KeyBar, extras: &[Extra]) {
+    let mods = held_modifiers();
+    let mut items: Vec<(String, &str, KeyEvent)> = Vec::new();
+    if let Some((_, labels)) = sets.iter().find(|(m, _)| *m == mods) {
+        for (i, l) in labels.iter().enumerate().filter(|(_, l)| !l.is_empty()) {
+            items.push((format!("F{}", i + 1), l, KeyEvent::new(KeyCode::F(i as u8 + 1), mods)));
+        }
+    }
+    let fkeys = items.len();
+    for e in extras.iter().filter(|e| e.mods == mods) {
+        items.push((e.key.to_string(), e.label, KeyEvent::new(e.code, e.mods)));
+    }
+    let width = |it: &(String, &str, KeyEvent)| (it.0.chars().count() + 1 + it.1.chars().count()) as i32;
+    // drop shortcuts from the end until everything fits (the F-keys always stay)
+    while items.len() > fkeys && items.iter().map(|i| width(i) + 1).sum::<i32>() > s.w {
+        items.pop();
+    }
+    let t = theme::current();
+    let y = s.h - 1;
+    s.fill(0, y, s.w, 1, ' ', t.key_label, t.key_bg);
+    let total: i32 = items.iter().map(width).sum();
+    let n = items.len() as i32;
+    let spare = (s.w - total).max(0);
+    let mut hits = Vec::new();
+    let mut x = 0;
+    for (i, it) in items.iter().enumerate() {
+        // spread the spare columns: item i gets its share (the first ones get the remainder)
+        let pad = if n > 0 { spare / n + i32::from((i as i32) < spare % n) } else { 0 };
+        let w = width(it) + pad;
+        s.text(x, y, &it.0, t.key_num, t.key_bg);
+        let kw = it.0.chars().count() as i32;
+        s.text(x + kw, y, &fit(&format!(" {}", it.1), (w - kw).clamp(0, (s.w - x - kw).max(0)) as usize), t.key_label, t.key_bg);
+        hits.push((x, x + w, it.2));
+        x += w;
+    }
+    if let Ok(mut h) = KEY_BAR_HITS.lock() {
+        *h = hits;
+    }
+}
 impl App {
     pub fn new(args: &[String]) -> Self {
         let (mut cwd_file, mut history_file, mut session_file, mut action_file) = (None, None, None, None);
@@ -189,7 +321,9 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| platform::home());
         let state = state_file().map(|f| read_kv(&f)).unwrap_or_default();
         if let Some(t) = state.get("theme") {
-            theme::set(t);
+            if !theme::set(t) {
+                vscode::apply(t);
+            }
         }
 
         // inside the `on` loop we come back after each command: restore exactly where we were
@@ -243,6 +377,8 @@ impl App {
             active,
             prev,
             cmd: LineEdit::new(""),
+            hidden_panel: None,
+            hist: crate::history::History::new(),
             quick: None,
             quit: false,
             cwd_file,
@@ -256,6 +392,12 @@ impl App {
             drag: None,
             init,
             host_relaunch,
+            preview: None,
+            backdrops: Vec::new(),
+            frames: Vec::new(),
+            window_frame: false,
+            resume_user: host_relaunch && session.get("user").is_some_and(|v| v == "1"),
+            last_find: find::Query { mask: "*".into(), text: String::new() },
         }
     }
 
@@ -284,6 +426,7 @@ impl App {
 
     fn set_active(&mut self, i: usize) {
         if i != self.active && i < self.panels.len() {
+            self.preview = None; // the preview panel becomes a normal panel again
             self.prev = self.active;
             self.active = i;
         }
@@ -342,6 +485,40 @@ impl App {
         self.fracs[j + 1] = (right - x) as f64 / w;
     }
 
+    /// Ctrl+P: hide the other panel (the active one takes the width), or show it again as it was.
+    fn toggle_panel(&mut self) {
+        if self.panels.len() > 1 {
+            let i = self.passive_idx();
+            let p = self.panels.remove(i);
+            let f = self.fracs.remove(i);
+            let nb = if i < self.panels.len() { i } else { i - 1 };
+            self.fracs[nb] += f;
+            if self.active > i {
+                self.active -= 1;
+            }
+            self.prev = self.active;
+            self.quick = None;
+            self.hidden_panel = Some((i, p, f));
+        } else if let Some((i, mut p, f)) = self.hidden_panel.take() {
+            let i = i.min(self.panels.len());
+            let f = f.clamp(0.1, 0.9);
+            for x in self.fracs.iter_mut() {
+                *x *= 1.0 - f;
+            }
+            self.fracs.insert(i, f);
+            p.load(None);
+            self.panels.insert(i, p);
+            if self.active >= i {
+                self.active += 1;
+            }
+            self.prev = i;
+        } else {
+            let a = self.active;
+            self.new_panel();
+            self.set_active(a);
+        }
+    }
+
     fn new_panel(&mut self) {
         if self.panels.len() >= MAX_PANELS {
             return; // already showing both panels
@@ -362,19 +539,6 @@ impl App {
         self.set_active(at);
     }
 
-    fn close_panel(&mut self) {
-        if self.panels.len() <= 1 {
-            return;
-        }
-        let i = self.active;
-        self.panels.remove(i);
-        let f = self.fracs.remove(i);
-        let nb = if i < self.panels.len() { i } else { i - 1 };
-        self.fracs[nb] += f;
-        self.active = nb;
-        self.prev = if self.prev > i { self.prev - 1 } else if self.prev == i { nb } else { self.prev };
-        self.quick = None;
-    }
 
     fn swap_panels(&mut self) {
         let p = self.passive_idx();
@@ -409,10 +573,14 @@ impl App {
             }
         }
 
+        if std::mem::take(&mut self.resume_user) {
+            self.user_screen();
+        }
         while !self.quit {
             match self.modal_input(&mut |_| {}, None) {
                 Input::Key(k) => self.handle(k),
                 Input::Mouse(m) => self.handle_mouse(m),
+                Input::Paste(t) => self.cmd.insert(&t.replace(['\r', '\n'], " ")),
                 Input::Tick => {}
             }
         }
@@ -450,7 +618,7 @@ impl App {
     /// Everything needed to come back exactly as we were after a command runs in the shell.
     fn save_session(&self) {
         let Some(f) = &self.session_file else { return };
-        let mut out = format!("panels={}\nactive={}\nprev={}\n", self.panels.len(), self.active, self.prev);
+        let mut out = format!("panels={}\nactive={}\nprev={}\nuser={}\n", self.panels.len(), self.active, self.prev, self.resume_user as u8);
         out += &format!("fracs={}\n", self.fracs.iter().map(|f| format!("{f:.4}")).collect::<Vec<_>>().join(","));
         for (i, p) in self.panels.iter().enumerate() {
             out += &format!("p{i}.dir={}\np{i}.sort={}\np{i}.desc={}\n", p.dir.display(), sort_name(p.sort), p.sort_desc as u8);
@@ -482,8 +650,19 @@ impl App {
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
             self.screen.resize();
-            self.draw_base();
+            self.draw_backdrop();
             overlay(&mut self.screen);
+            // remember this frame for dialogs opened from here
+            let depth = self.backdrops.len();
+            self.frames.truncate(depth + 1);
+            // a window's frame, or a dialog's (a dialog opened from a dialog is drawn over both)
+            let keep = std::mem::take(&mut self.window_frame) || depth > 0;
+            let snap = keep.then(|| self.screen.snapshot());
+            if self.frames.len() > depth {
+                self.frames[depth] = snap;
+            } else if self.frames.len() == depth {
+                self.frames.push(snap);
+            }
             self.screen.flush();
             let redraw_at = Instant::now() + Duration::from_secs(1);
             loop {
@@ -495,10 +674,24 @@ impl App {
                 if now >= until {
                     break;
                 }
-                match event::poll(until - now) {
+                // short slices, so holding Shift / Ctrl / Alt updates the key bar quickly
+                let slice = (until - now).min(Duration::from_millis(80));
+                let mods = platform::modifiers();
+                if mods.bits() != MODS.load(Ordering::Relaxed) {
+                    MODS.store(mods.bits(), Ordering::Relaxed);
+                    break;
+                }
+                match event::poll(slice) {
                     Ok(true) => match event::read() {
                         Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => return Input::Key(k),
+                        // a click on the key bar presses that F-key, in every screen that has one
+                        Ok(Event::Mouse(m)) if m.kind == MouseEventKind::Down(MouseButton::Left) && m.row as i32 == self.screen.h - 1 => {
+                            if let Some(k) = key_bar_hit(m.column as i32) {
+                                return Input::Key(k);
+                            }
+                        }
                         Ok(Event::Mouse(m)) if m.kind != MouseEventKind::Moved => return Input::Mouse(m),
+                        Ok(Event::Paste(t)) => return Input::Paste(t),
                         Ok(Event::Resize(..)) => break,
                         _ => {}
                     },
@@ -521,6 +714,33 @@ impl App {
         }
     }
 
+    /// modal_input for a window (viewer, editor, tools...): dialogs it opens are drawn over it.
+    pub fn window_input(&mut self, overlay: &mut dyn FnMut(&mut Screen), timeout: Option<Duration>) -> Input {
+        self.window_frame = true;
+        self.modal_input(overlay, timeout)
+    }
+
+    /// Run  (a dialog) over what is on the screen now, e.g. the viewer, instead of over the panels.
+    pub fn over<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+        let depth = self.backdrops.len();
+        let snap = self.frames.get(depth).cloned().flatten();
+        self.backdrops.push(snap);
+        let r = f(self);
+        self.backdrops.pop();
+        r
+    }
+
+    /// The screen under a dialog: the window that opened it, or the panels.
+    pub fn draw_backdrop(&mut self) {
+        let restored = match self.backdrops.last() {
+            Some(Some(b)) => self.screen.restore(b),
+            _ => false,
+        };
+        if !restored {
+            self.draw_base();
+        }
+    }
+
     pub fn draw_base(&mut self) {
         let t = theme::current();
         let prompt = self.prompt();
@@ -529,9 +749,15 @@ impl App {
         self.screen.fill(0, 0, w, h, ' ', t.cmd_fg, t.cmd_bg);
         let lay = self.layout();
         let q = self.quick.as_deref();
+        let cur = self.panels[self.active].current().cloned();
+        let in_arc = self.panels[self.active].arc.is_some();
+        let cur_dir = self.panels[self.active].dir.clone();
         for (i, (x, pw)) in lay.into_iter().enumerate() {
             let active = i == self.active;
-            self.panels[i].draw(&mut self.screen, x, 0, pw, h - 2, active, if active { q } else { None });
+            match self.preview.as_mut() {
+                Some(p) if !active => p.draw(&mut self.screen, x, 0, pw, h - 2, cur.as_ref(), in_arc, &cur_dir),
+                _ => self.panels[i].draw(&mut self.screen, x, 0, pw, h - 2, active, if active { q } else { None }),
+            }
         }
         draw_clock(&mut self.screen);
 
@@ -541,7 +767,21 @@ impl App {
         if self.quick.is_some() {
             self.screen.cursor = Some(self.panels[self.active].quick_pos);
         }
-        draw_key_bar(&mut self.screen, &["Help", "Menu", "View", "Edit", "Copy", "Ren", "MkDir", "Del", "", "Menu"]);
+        if let Some(p) = self.preview.as_ref().filter(|p| p.focused) {
+            let labels = p.key_labels();
+            draw_key_bars(&mut self.screen, &[(KeyModifiers::NONE, labels)]);
+            return;
+        }
+        draw_key_bars_with(
+            &mut self.screen,
+            &[
+                (KeyModifiers::NONE, ["Help", "Tools", "View", "Edit", "Copy", "RenMov", "MkDir", "Delete", "", "Menu"]),
+                (KeyModifiers::SHIFT, ["", "", "Diff", "New", "", "Rename", "", "Wipe", "", ""]),
+                (KeyModifiers::CONTROL, ["", "Calc", "Name", "Ext", "Time", "Size", "", "", "", ""]),
+                (KeyModifiers::ALT, ["Drives", "Other", "GitDif", "", "SysMon", "", "Find", "", "", "Tree"]),
+            ],
+            &PANEL_EXTRAS,
+        );
     }
 
     // --------------------------------------------------------------- mouse
@@ -554,8 +794,10 @@ impl App {
                 self.quick = None;
                 // key bar: click = press that F-key
                 if my == h - 1 {
-                    let slot = (mx / (w / 10).max(1)).min(9) as u8;
-                    return self.handle(KeyEvent::new(KeyCode::F(slot + 1), KeyModifiers::NONE));
+                    if let Some(k) = key_bar_hit(mx) {
+                        self.handle(k);
+                    }
+                    return;
                 }
                 // top row: open the menu at the title under the mouse
                 if my == 0 && mx < w - 10 {
@@ -578,9 +820,16 @@ impl App {
                     }
                 }
                 let Some(i) = self.panel_at(mx) else { return };
+                if let Some(p) = self.preview.as_mut() {
+                    // the preview stays: a click on it gives it the keyboard, on the file panel takes it back
+                    p.focused = i != self.active;
+                    if p.focused {
+                        return;
+                    }
+                }
                 self.set_active(i);
                 if let Some(idx) = self.panels[i].hit(mx, my) {
-                    let double = self.last_click.is_some_and(|(at, pi, pidx)| pi == i && pidx == idx && at.elapsed().as_millis() < 400);
+                    let double = self.last_click.is_some_and(|(at, pi, pidx)| pi == i && pidx == idx && at.elapsed().as_millis() < platform::double_click_ms());
                     self.panels[i].move_to(idx);
                     if double {
                         self.last_click = None;
@@ -617,8 +866,13 @@ impl App {
                     return;
                 }
                 let Some(i) = self.panel_at(mx) else { return };
-                self.set_active(i);
                 let d = if m.kind == MouseEventKind::ScrollUp { -3 } else { 3 };
+                if i != self.active {
+                    if let Some(p) = self.preview.as_mut() {
+                        return p.scroll(d);
+                    }
+                }
+                self.set_active(i);
                 self.panels[i].move_by(d);
             }
             _ => {}
@@ -632,6 +886,23 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let cmd_empty = self.cmd.is_empty();
+
+        // the preview has the keyboard (Tab gave it): it scrolls and switches view modes like F3
+        if let Some(p) = self.preview.as_mut().filter(|p| p.focused) {
+            match k.code {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => {
+                    p.focused = false;
+                    return;
+                }
+                KeyCode::F(1) => return help::show(self, "preview"),
+                _ if !ctrl && !alt => match p.key(k.code) {
+                    viewer::DocKey::Done => return,
+                    viewer::DocKey::Error(e) => return dialogs::message(self, "Format", &e, true),
+                    viewer::DocKey::No => {}
+                },
+                _ => {}
+            }
+        }
 
         // quick search: Alt+letter starts it, plain letters continue it
         if let Some(q) = self.quick.clone() {
@@ -660,6 +931,9 @@ impl App {
                 KeyCode::F(1) => return self.run_cmd(Cmd::DriveActive),
                 KeyCode::F(2) => return self.run_cmd(Cmd::DriveOther),
                 KeyCode::F(10) => return self.run_cmd(Cmd::Tree),
+                KeyCode::F(3) => return self.run_cmd(Cmd::GitDiff),
+                KeyCode::F(7) => return self.run_cmd(Cmd::Find),
+                KeyCode::F(5) => return self.run_cmd(Cmd::SysMon),
                 KeyCode::Char('x') | KeyCode::Char('X') => return self.cmd_quit(),
                 KeyCode::Char(c) => {
                     self.quick = Some(String::new());
@@ -683,23 +957,44 @@ impl App {
                 KeyCode::Char('u') => return self.run_cmd(Cmd::Swap),
                 KeyCode::Char('o') => return self.run_cmd(Cmd::UserScreen),
                 KeyCode::Char('t') => return self.run_cmd(Cmd::NextTheme),
-                KeyCode::Char('n') => return self.run_cmd(Cmd::NewPanel),
-                KeyCode::Char('w') => return self.run_cmd(Cmd::ClosePanel),
-                KeyCode::Char('e') => return self.run_cmd(Cmd::EqualWidths),
-                KeyCode::Right => return self.run_cmd(Cmd::Wider),
-                KeyCode::Left => return self.run_cmd(Cmd::Narrower),
-                KeyCode::Char('\\') | KeyCode::Char('4') => return self.go_root(),
-                KeyCode::PageUp => return self.go_parent(),
-                KeyCode::PageDown => {
-                    if let Some(e) = self.active().current().filter(|e| e.is_dir || archive::is_archive(&e.name)).cloned() {
-                        self.open(e);
+                KeyCode::Char('p') => return self.run_cmd(Cmd::TogglePanel),
+                KeyCode::Char('g') => return self.run_cmd(Cmd::Game),
+                // Ctrl+E / Ctrl+Shift+E: previous / next command from the history
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    let back = !shift && k.code == KeyCode::Char('e');
+                    let line = if back { self.hist.prev(&self.shell, &self.cmd.value()) } else { self.hist.next() };
+                    if let Some(l) = line {
+                        self.cmd.set(&l);
                     }
                     return;
                 }
+                KeyCode::Char('d') => return self.run_cmd(Cmd::AddFavorite),
+                KeyCode::Char('l') => return self.run_cmd(Cmd::Preview),
+                KeyCode::Up | KeyCode::Down if self.preview.is_some() => {
+                    if let Some(p) = self.preview.as_mut() {
+                        p.scroll(if k.code == KeyCode::Up { -1 } else { 1 });
+                    }
+                    return;
+                }
+                KeyCode::Right => return self.run_cmd(Cmd::Wider),
+                KeyCode::Left => return self.run_cmd(Cmd::Narrower),
+                KeyCode::Char('\\') => return self.go_root(),
+                // the file name, as it is, to the command line
                 KeyCode::Enter | KeyCode::Char('j') => {
                     if let Some(e) = self.active().current().filter(|e| !e.is_up).cloned() {
-                        let q = platform::quote(&self.shell, &e.name);
-                        self.cmd.insert(&format!("{q} "));
+                        self.cmd.insert(&format!("{} ", e.name));
+                    }
+                    return;
+                }
+                // Ctrl+[ / Ctrl+]: the left / right panel's folder to the command line.
+                // Consoles may report Ctrl+[ as Esc and Ctrl+] as Ctrl+5.
+                KeyCode::Char('[') | KeyCode::Esc => return self.insert_panel_path(0),
+                KeyCode::Char(']') | KeyCode::Char('5') => return self.insert_panel_path(1),
+                // Ctrl+Ins: copy the command line, or the file name when it is empty
+                KeyCode::Insert => {
+                    let text = if cmd_empty { self.active().current().filter(|e| !e.is_up).map(|e| e.name.clone()).unwrap_or_default() } else { self.cmd.value() };
+                    if !text.is_empty() {
+                        crate::editor::copy(&text);
                     }
                     return;
                 }
@@ -713,11 +1008,17 @@ impl App {
         let step = if p.view == ViewMode::Brief { p.rows as isize } else { page };
         let handled = match k.code {
             KeyCode::Tab => {
-                self.set_active((self.active + 1) % n);
+                match self.preview.as_mut() {
+                    Some(pv) => pv.focused = true,
+                    None => self.set_active((self.active + 1) % n),
+                }
                 true
             }
             KeyCode::BackTab => {
-                self.set_active((self.active + n - 1) % n);
+                match self.preview.as_mut() {
+                    Some(pv) => pv.focused = true,
+                    None => self.set_active((self.active + n - 1) % n),
+                }
                 true
             }
             KeyCode::Up => {
@@ -767,10 +1068,6 @@ impl App {
                 self.cmd.set("");
                 true
             }
-            KeyCode::Backspace if cmd_empty => {
-                self.go_parent();
-                true
-            }
             KeyCode::Insert => {
                 p.toggle_current();
                 true
@@ -788,21 +1085,25 @@ impl App {
                 true
             }
             KeyCode::F(1) => {
-                self.help();
+                help::show(self, "panels");
                 true
             }
-            KeyCode::F(2) | KeyCode::F(9) | KeyCode::F(10) => {
+            KeyCode::F(2) => {
+                self.run_cmd(Cmd::Tools);
+                true
+            }
+            KeyCode::F(10) => {
                 if let Some(c) = menu::run(self, 0) {
                     self.run_cmd(c);
                 }
                 true
             }
             KeyCode::F(3) => {
-                self.cmd_view();
+                if shift { self.compare_files() } else { self.cmd_view() }
                 true
             }
             KeyCode::F(4) => {
-                self.cmd_edit();
+                if shift { self.cmd_new_file() } else { self.cmd_edit() }
                 true
             }
             KeyCode::F(5) => {
@@ -827,8 +1128,8 @@ impl App {
             }
             _ => false,
         };
-        if !handled {
-            self.cmd.handle(&k);
+        if !handled && self.cmd.handle(&k) {
+            self.hist.reset();
         }
     }
 
@@ -841,12 +1142,22 @@ impl App {
                 p.show_hidden = !p.show_hidden;
                 p.load(None);
             }
-            Cmd::Reread => self.active().load(None),
+            Cmd::Reread => {
+                self.active().load(None);
+                if let Some(p) = self.preview.as_mut() {
+                    p.forget();
+                }
+            }
             Cmd::DriveActive => self.change_drive(self.active),
             Cmd::DriveOther => self.change_drive(self.passive_idx()),
             Cmd::Tree => self.cmd_tree(),
             Cmd::View => self.cmd_view(),
             Cmd::Edit => self.cmd_edit(),
+            Cmd::NewFile => self.cmd_new_file(),
+            Cmd::AddFavorite => {
+                let dir = self.panels[self.active].dir.clone();
+                favorites::add(self, &dir);
+            }
             Cmd::Copy => fileops::copy_or_move(self, false),
             Cmd::Move => fileops::copy_or_move(self, true),
             Cmd::Rename => self.cmd_rename(),
@@ -861,20 +1172,53 @@ impl App {
             Cmd::Swap => self.swap_panels(),
             Cmd::UserScreen => self.user_screen(),
             Cmd::Quit => self.cmd_quit(),
-            Cmd::Help => self.help(),
+            Cmd::Help => help::show(self, "panels"),
             Cmd::About => dialogs::message(self, "About", "Orthodox Navigator\nprototype 0.2 (Rust)\n\nIn memory of DOS Navigator", false),
-            Cmd::NextTheme => theme::next(),
+            Cmd::NextTheme => vscode::pick(self),
             Cmd::Calculator => {
                 if let Some(text) = calc::show(self) {
                     self.cmd.insert(&text);
                 }
             }
             Cmd::Game => game::show(self),
-            Cmd::NewPanel => self.new_panel(),
-            Cmd::ClosePanel => self.close_panel(),
+            Cmd::SysMon => sysmon::show(self),
+            Cmd::TogglePanel => self.toggle_panel(),
             Cmd::Wider => self.resize_active(2),
             Cmd::Narrower => self.resize_active(-2),
             Cmd::EqualWidths => self.equal_widths(),
+            Cmd::CompareFiles => self.compare_files(),
+            Cmd::GitDiff => self.git_diff(),
+            Cmd::Find => {
+                let last = std::mem::replace(&mut self.last_find, find::Query { mask: String::new(), text: String::new() });
+                let q = find::ask(self, &last);
+                self.last_find = last;
+                let Some(q) = q else { return };
+                let root = self.panels[self.active].dir.clone();
+                let results = find::search(self, &root, &q);
+                if results.is_empty() {
+                    dialogs::message(self, "Find files", "Nothing found.", false);
+                } else {
+                    let a = self.active;
+                    self.panels[a].set_results(format!("{} ({})", q.describe(), results.len()), results);
+                }
+                self.last_find = q;
+            }
+            Cmd::Tools => {
+                let file = self.panels[self.active].current().filter(|e| !e.is_dir && !e.is_up).map(|e| e.path.clone());
+                let dir = self.panels[self.active].dir.clone();
+                tools::show(self, file, &dir);
+            }
+            Cmd::Preview => {
+                if self.preview.is_some() {
+                    self.preview = None;
+                } else {
+                    if self.panels.len() < 2 {
+                        self.new_panel();
+                        self.set_active(self.prev);
+                    }
+                    self.preview = Some(Preview::default());
+                }
+            }
         }
     }
 
@@ -909,6 +1253,19 @@ impl App {
                 }
             }
             return;
+        }
+        if self.panels[i].found.is_some() {
+            // in search results: go to the item (or back to the folder for ..)
+            if e.is_up {
+                return self.panels[i].close_results();
+            }
+            if !e.is_dir {
+                let focus = e.path.file_name().map(|n| n.to_string_lossy().to_string());
+                if let Some(parent) = e.path.parent() {
+                    self.go(i, parent, focus.as_deref());
+                }
+                return;
+            }
         }
         if e.is_up {
             return self.go_parent();
@@ -952,6 +1309,9 @@ impl App {
         if self.panels[i].arc.is_some() {
             return self.panels[i].archive_up();
         }
+        if self.panels[i].found.is_some() {
+            return self.panels[i].close_results();
+        }
         let dir = self.panels[i].dir.clone();
         if let Some(parent) = dir.parent() {
             let name = dir.file_name().map(|n| n.to_string_lossy().to_string());
@@ -968,29 +1328,18 @@ impl App {
     }
 
     pub fn change_drive(&mut self, panel: usize) {
-        let mut vols = platform::volumes();
-        if !cfg!(windows) {
-            vols.insert(0, platform::home());
-        }
-        let labels: Vec<String> = vols
-            .iter()
-            .map(|v| {
-                let name = v.to_string_lossy().trim_end_matches('\\').to_string();
-                let free = platform::free_space(v).map(|f| format!("{:>8} free", human(f))).unwrap_or_else(|| "   not ready".into());
-                format!("{:<24} {free}", fit_left(&name, 24))
-            })
-            .collect();
-        let cur = platform::volume_of(&self.panels[panel].dir);
-        let init = vols.iter().position(|v| platform::volume_of(v) == cur && (cfg!(windows) || v != &platform::home())).unwrap_or(0);
-        let Some(i) = dialogs::list_menu(self, "Drive", &labels, init) else { return };
-        let root = vols[i].clone();
-        let target = if root == platform::home() {
-            root.clone()
-        } else {
-            self.last_dir.get(&platform::volume_of(&root)).filter(|p| p.is_dir()).cloned().unwrap_or(root.clone())
+        let title = if panel == self.active { "Drives and favourites" } else { "Drives and favourites (other panel)" };
+        let current = self.panels[panel].dir.clone();
+        let Some(pick) = favorites::pick(self, title, &current) else { return };
+        let (target, shown) = match pick {
+            favorites::Pick::Volume(root) if root != platform::home() => {
+                let t = self.last_dir.get(&platform::volume_of(&root)).filter(|p| p.is_dir()).cloned().unwrap_or(root.clone());
+                (t, root)
+            }
+            favorites::Pick::Volume(p) | favorites::Pick::Folder(p) => (p.clone(), p),
         };
         if !self.go(panel, &target, None) {
-            dialogs::message(self, "Error", &format!("{} is not ready.", root.display()), true);
+            dialogs::message(self, "Error", &format!("{} is not available.", shown.display()), true);
         }
         self.set_active(panel);
     }
@@ -1010,20 +1359,88 @@ impl App {
         }
     }
 
+    /// Shift+F3: compare the file under the cursor with the other panel's file
+    /// (the one with the same name there, else the one under its cursor).
+    fn compare_files(&mut self) {
+        let Some(a) = self.panels[self.active].current().filter(|e| !e.is_dir).cloned() else {
+            return dialogs::message(self, "Compare", "Put the cursor on a file.", false);
+        };
+        if self.panels.len() < 2 || self.panels[self.active].arc.is_some() {
+            return dialogs::message(self, "Compare", "Compare needs two panels, each showing a file.", false);
+        }
+        let other = &self.panels[self.passive_idx()];
+        let same_name = other.dir.join(&a.name);
+        let b = if same_name.is_file() && !same_path(&same_name, &a.path) {
+            same_name
+        } else {
+            match other.current().filter(|e| !e.is_dir) {
+                Some(e) => e.path.clone(),
+                None => return dialogs::message(self, "Compare", "Put the other panel's cursor on a file to compare with.", false),
+            }
+        };
+        let read = |p: &Path| fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned());
+        match (read(&a.path), read(&b)) {
+            (Ok(ta), Ok(tb)) => diff::show(self, &a.path.display().to_string(), &ta, &b.display().to_string(), &tb),
+            (Err(e), _) | (_, Err(e)) => dialogs::message(self, "Compare", &e.to_string(), true),
+        }
+    }
+
+    /// Alt+F3: what changed in this file since the last commit.
+    fn git_diff(&mut self) {
+        let Some(e) = self.panels[self.active].current().filter(|e| !e.is_dir).cloned() else {
+            return dialogs::message(self, "Git diff", "Put the cursor on a file.", false);
+        };
+        if git::repo_root(&self.panels[self.active].dir).is_none() {
+            return dialogs::message(self, "Git diff", "This folder is not in a git repository.", false);
+        }
+        let Some(head) = git::head_text(&e.path) else {
+            return dialogs::message(self, "Git diff", &format!("{} is not committed yet (or git isn't installed).", e.name), false);
+        };
+        let now = fs::read(&e.path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        diff::show(self, &format!("{} (HEAD)", e.name), &head, &format!("{} (working copy)", e.name), &now);
+    }
+
+    /// F4: the built-in editor.
     fn cmd_edit(&mut self) {
         if self.active().arc.is_some() {
             return fileops::read_only(self);
         }
         let Some(e) = self.active().current().filter(|e| !e.is_dir).cloned() else { return };
-        let file = platform::quote(&self.shell, &e.path.to_string_lossy());
-        match std::env::var("EDITOR") {
-            Ok(ed) if !ed.trim().is_empty() => self.run_shell(&format!("{ed} {file}")),
-            _ if cfg!(windows) => {
-                if let Err(err) = Command::new("notepad.exe").arg(&e.path).spawn() {
-                    dialogs::message(self, "Error", &err.to_string(), true);
-                }
+        if editor::edit(self, &e.path) {
+            self.reload_after_edit(&e.path);
+        }
+    }
+
+    /// Shift+F4: edit a new (or any) file by name.
+    fn cmd_new_file(&mut self) {
+        if self.active().arc.is_some() {
+            return fileops::read_only(self);
+        }
+        let Some(name) = dialogs::input(self, "Edit file", "File to edit (it is created when you save):", "") else { return };
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let path = self.active().dir.join(name);
+        if let Some(parent) = path.parent().filter(|p| !p.exists()) {
+            if let Err(err) = fs::create_dir_all(parent) {
+                return dialogs::message(self, "Error", &err.to_string(), true);
             }
-            _ => self.run_shell(&format!("vi {file}")),
+        }
+        if editor::edit(self, &path) {
+            self.reload_after_edit(&path);
+        }
+    }
+
+    fn reload_after_edit(&mut self, path: &Path) {
+        let a = self.active;
+        if path.parent().is_some_and(|p| same_path(p, &self.panels[a].dir)) {
+            let focus = path.file_name().map(|n| n.to_string_lossy().to_string());
+            self.panels[a].load(focus.as_deref());
+        }
+        let p = self.passive_idx();
+        if p != a {
+            self.panels[p].load(None);
         }
     }
 
@@ -1122,18 +1539,115 @@ impl App {
         dialogs::message(self, "Compare directories", &text, false);
     }
 
+    /// Ctrl+O: hide the panels and show the console. The command line stays at the bottom: type and run
+    /// commands as in a plain shell; Ctrl+O brings the panels back.
     fn user_screen(&mut self) {
+        use crossterm::{cursor, queue, style::Print};
         self.screen.suspend();
         let _ = terminal::enable_raw_mode();
+        let mut out = std::io::stdout();
+        if cursor::position().is_ok_and(|(x, _)| x > 0) {
+            let _ = write!(out, "\r\n");
+        }
         loop {
-            if let Ok(Event::Key(k)) = event::read() {
-                if k.kind != KeyEventKind::Release {
-                    break;
+            // the prompt line, scrolled so the cursor stays visible
+            let prompt = self.prompt();
+            let pad = if prompt.ends_with(' ') { "" } else { " " };
+            let plen = prompt.chars().count() + pad.len();
+            let width = terminal::size().map_or(80, |(w, _)| w as usize);
+            let avail = width.saturating_sub(plen + 1).max(1);
+            let chars: Vec<char> = self.cmd.value().chars().collect();
+            let pos = self.cmd.pos();
+            let start = pos.saturating_sub(avail);
+            let shown: String = chars[start..chars.len().min(start + avail)].iter().collect();
+            let _ = queue!(
+                out,
+                cursor::MoveToColumn(0),
+                terminal::Clear(terminal::ClearType::UntilNewLine),
+                Print(format!("{prompt}{pad}{shown}")),
+                cursor::MoveToColumn((plen + pos - start) as u16)
+            );
+            let _ = out.flush();
+
+            let k = match event::read() {
+                Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => k,
+                Ok(Event::Paste(t)) => {
+                    self.cmd.insert(&t.replace(['\r', '\n'], " "));
+                    continue;
+                }
+                _ => continue,
+            };
+            let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+            match k.code {
+                KeyCode::Char('o') | KeyCode::Char('O') if ctrl => break,
+                KeyCode::Esc => self.cmd.set(""),
+                KeyCode::Enter => {
+                    let text = self.cmd.value();
+                    let t = text.trim();
+                    let wrapper = self.action_file.is_some() && !t.is_empty() && self.builtin_name(t).is_none();
+                    if wrapper {
+                        // the wrapper prints the prompt and command itself
+                        let _ = queue!(out, cursor::MoveToColumn(0), terminal::Clear(terminal::ClearType::CurrentLine));
+                        let _ = out.flush();
+                    } else {
+                        let _ = write!(out, "\r\n");
+                    }
+                    if t.is_empty() {
+                        continue;
+                    }
+                    self.cmd.set("");
+                    self.add_history(t);
+                    match self.builtin(t) {
+                        Some(Err(e)) => {
+                            let _ = write!(out, "{}\r\n", e.replace('\n', "\r\n"));
+                        }
+                        Some(Ok(())) if self.quit => {
+                            let _ = terminal::disable_raw_mode();
+                            return;
+                        }
+                        Some(Ok(())) => {}
+                        // the `on` wrapper runs it in the real shell, then starts us again on this screen
+                        None if self.action_file.is_some() => {
+                            self.pending_run = Some(t.to_string());
+                            self.resume_user = true;
+                            self.quit = true;
+                            let _ = terminal::disable_raw_mode();
+                            return;
+                        }
+                        None => {
+                            let _ = terminal::disable_raw_mode();
+                            let mut c = platform::shell_command(&self.shell, t);
+                            c.current_dir(&self.panels[self.active].dir);
+                            if let Err(e) = c.status() {
+                                println!("{e}");
+                            }
+                            let _ = terminal::enable_raw_mode();
+                            if cursor::position().is_ok_and(|(x, _)| x > 0) {
+                                let _ = write!(out, "\r\n");
+                            }
+                            for p in self.panels.iter_mut() {
+                                p.load(None);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    self.cmd.handle(&k);
                 }
             }
         }
+        let _ = write!(out, "\r\n");
         let _ = terminal::disable_raw_mode();
         self.screen.resume();
+    }
+    /// Put panel `i`'s folder (0 = left, 1 = right) on the command line.
+    fn insert_panel_path(&mut self, i: usize) {
+        let i = i.min(self.panels.len() - 1);
+        let mut path = self.panels[i].dir.to_string_lossy().to_string();
+        if !path.ends_with(std::path::MAIN_SEPARATOR) {
+            path.push(std::path::MAIN_SEPARATOR);
+        }
+        self.cmd.insert(&path);
     }
 
     fn cmd_quit(&mut self) {
@@ -1142,29 +1656,11 @@ impl App {
         }
     }
 
-    fn help(&mut self) {
-        let lines = [
-            "Tab / Shift+Tab  next / previous panel   Ctrl+U swap with other panel",
-            "Ctrl+W hide a panel  Ctrl+N show it again  Ctrl+←/→ resize  Ctrl+E equal",
-            "Enter open / run / browse archive        Bksp parent folder",
-            "Insert select   + - * select / unselect / invert    Alt+a-z quick search",
-            "F3 view (folder: size)  F4 edit  F5 copy (archive: extract)  F6 move",
-            "Shift+F6 rename  F7 mkdir  F8/Del to Trash  Shift+F8 delete permanently",
-            "Alt+F1/F2 drive (this / other panel)   Alt+F10 directory tree",
-            "Ctrl+F2 calculator   Ctrl+F3..F6 sort name/ext/time/size",
-            "Ctrl+B brief/full  Ctrl+H hidden  Ctrl+R re-read  Ctrl+T colors",
-            "Ctrl+O user screen  Ctrl+Enter name to command line  F9/F10 menu  Alt+X quit",
-            "",
-            "Mouse: click selects, double-click opens, right-click marks, wheel scrolls,",
-            "drag a border between panels to resize, click the top row for the menu.",
-        ];
-        dialogs::choice(self, "Help", &lines, &["OK"], false);
-    }
-
     // -------------------------------------------------------- command line
 
     /// Remember a command so the wrapper can add it to the shell's history.
-    fn add_history(&self, command: &str) {
+    fn add_history(&mut self, command: &str) {
+        self.hist.add(command);
         let Some(f) = &self.history_file else { return };
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(f) {
             let _ = writeln!(file, "{}", command.replace(['\r', '\n'], " "));
@@ -1174,25 +1670,41 @@ impl App {
     fn execute(&mut self, text: &str) {
         let t = text.trim();
         self.add_history(t);
+        match self.builtin(t) {
+            Some(Err(e)) => dialogs::message(self, "Error", &e, true),
+            Some(Ok(())) => {}
+            None => self.run_shell(t),
+        }
+    }
+
+    /// Is `t` one of ON's own commands (see builtin)? Doesn't run it.
+    fn builtin_name(&self, t: &str) -> Option<()> {
+        let lower = t.to_lowercase();
+        let drive = cfg!(windows) && t.len() == 2 && t.ends_with(':') && t.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+        let cd = lower.starts_with("cd ") || lower.starts_with("cd\\") || lower.starts_with("cd..") || lower.starts_with("cd/");
+        (lower == "exit" || t == "~" || lower == "cd ~" || (!cfg!(windows) && lower == "cd") || drive || cd).then_some(())
+    }
+
+    /// Commands ON does itself: exit, cd, ~, a drive letter. None if `t` is for the shell.
+    fn builtin(&mut self, t: &str) -> Option<Result<(), String>> {
         let i = self.active;
         let lower = t.to_lowercase();
-
         if lower == "exit" {
             self.quit = true;
-            return;
+            return Some(Ok(()));
         }
         if t == "~" || lower == "cd ~" || (!cfg!(windows) && lower == "cd") {
             self.go(i, &platform::home(), None);
-            return;
+            return Some(Ok(()));
         }
         // "d:" switches drive (Windows)
         if cfg!(windows) && t.len() == 2 && t.ends_with(':') && t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
             let root = format!("{}:\\", t[..1].to_uppercase());
             let target = self.last_dir.get(&root[..2]).cloned().unwrap_or_else(|| PathBuf::from(&root));
             if !self.go(i, &target, None) {
-                dialogs::message(self, "Error", &format!("Drive {root} is not ready."), true);
+                return Some(Err(format!("Drive {root} is not ready.")));
             }
-            return;
+            return Some(Ok(()));
         }
         // "cd x", "cd ..", "cd\x", "cd /d d:\x"
         if lower.starts_with("cd ") || lower.starts_with("cd\\") || lower.starts_with("cd..") || lower.starts_with("cd/") {
@@ -1202,7 +1714,7 @@ impl App {
             }
             let arg = arg.trim_matches(|c| c == '"' || c == '\'');
             if arg.is_empty() {
-                return;
+                return Some(Ok(()));
             }
             let arg = if let Some(rest) = arg.strip_prefix("~/").or_else(|| arg.strip_prefix("~\\")) {
                 platform::home().join(rest)
@@ -1211,13 +1723,12 @@ impl App {
             };
             let target = normalize(&self.active().dir.join(arg));
             if !self.go(i, &target, None) {
-                dialogs::message(self, "Error", &format!("The folder does not exist:\n{}", target.display()), true);
+                return Some(Err(format!("The folder does not exist:\n{}", target.display())));
             }
-            return;
+            return Some(Ok(()));
         }
-        self.run_shell(t);
+        None
     }
-
     /// Run a command line.
     /// Started from the `on` wrapper: hand it to the real shell session (we exit; the wrapper runs it
     /// and starts us again). Started directly: run it in a child shell; output stays on the user screen.

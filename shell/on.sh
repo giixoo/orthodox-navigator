@@ -2,6 +2,7 @@
 #
 # Add this line to ~/.bashrc or ~/.zshrc:
 #     source /path/to/orthodox-navigator/shell/on.sh
+# (installed from a .deb / .rpm package: source /usr/share/orthodox-navigator/on.sh)
 #
 # Then type `on`. Commands you type in the file manager run right here, in this shell session -
 # your aliases, functions and variables work, and a `cd` is followed. The file manager steps aside
@@ -18,6 +19,7 @@ else
 fi
 if [ -z "${ORTHODOX_NAVIGATOR_EXE-}" ]; then
     if [ -x "$_on_dir/../bin/on" ]; then ORTHODOX_NAVIGATOR_EXE=$_on_dir/../bin/on
+    elif [ -x "$_on_dir/../../bin/on" ]; then ORTHODOX_NAVIGATOR_EXE=$_on_dir/../../bin/on   # /usr/share/orthodox-navigator -> /usr/bin
     else ORTHODOX_NAVIGATOR_EXE=$_on_dir/../rust/target/release/on; fi
 fi
 unset _on_dir

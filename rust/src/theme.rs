@@ -2,7 +2,9 @@
 
 use crate::screen::C;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
+#[derive(Clone, Copy)]
 pub struct Theme {
     pub name: &'static str,
 
@@ -17,6 +19,8 @@ pub struct Theme {
     // screen furniture
     pub menu_fg: C, pub menu_bg: C, pub menu_hot: C, pub menu_sel_fg: C, pub menu_sel_bg: C,
     pub clock_fg: C, pub clock_bg: C,
+    /// title line of the viewer, editor and other full-screen windows
+    pub bar_fg: C, pub bar_bg: C,
     pub key_num: C, pub key_label: C, pub key_bg: C,
     pub cmd_fg: C, pub cmd_bg: C,
 
@@ -28,6 +32,7 @@ pub struct Theme {
 
     // viewer
     pub viewer_fg: C, pub viewer_bg: C,
+    pub syn_keyword: C, pub syn_type: C, pub syn_string: C, pub syn_comment: C, pub syn_number: C, pub syn_meta: C,
 }
 
 use C::*;
@@ -45,6 +50,7 @@ pub static GRAY: Theme = Theme {
 
     menu_fg: Black, menu_bg: LightGray, menu_hot: Red, menu_sel_fg: White, menu_sel_bg: Black,
     clock_fg: Blue, clock_bg: LightGray,
+    bar_fg: Black, bar_bg: Cyan,
     key_num: Red, key_label: Black, key_bg: LightGray,
     cmd_fg: White, cmd_bg: Black,
 
@@ -54,6 +60,7 @@ pub static GRAY: Theme = Theme {
     list_sel_fg: Black, list_sel_bg: Cyan,
 
     viewer_fg: LightGray, viewer_bg: DarkGray,
+    syn_keyword: White, syn_type: Yellow, syn_string: LightGreen, syn_comment: Cyan, syn_number: LightMagenta, syn_meta: LightRed,
 };
 
 pub static BLUE: Theme = Theme {
@@ -69,6 +76,7 @@ pub static BLUE: Theme = Theme {
 
     menu_fg: Black, menu_bg: Cyan, menu_hot: Red, menu_sel_fg: White, menu_sel_bg: Black,
     clock_fg: Black, clock_bg: Cyan,
+    bar_fg: Black, bar_bg: Cyan,
     key_num: White, key_label: Black, key_bg: Cyan,
     cmd_fg: LightGray, cmd_bg: Black,
 
@@ -78,20 +86,55 @@ pub static BLUE: Theme = Theme {
     list_sel_fg: White, list_sel_bg: Black,
 
     viewer_fg: LightCyan, viewer_bg: Blue,
+    syn_keyword: White, syn_type: Yellow, syn_string: LightGreen, syn_comment: LightGray, syn_number: LightMagenta, syn_meta: LightRed,
 };
 
-pub static ALL: [&Theme; 2] = [&GRAY, &BLUE];
+static BUILT_IN: [&Theme; 2] = [&GRAY, &BLUE];
+/// Themes loaded while running (VS Code themes); never removed, so they can be 'static.
+static LOADED: RwLock<Vec<&'static Theme>> = RwLock::new(Vec::new());
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
+fn get(i: usize) -> Option<&'static Theme> {
+    if i < BUILT_IN.len() {
+        Some(BUILT_IN[i])
+    } else {
+        LOADED.read().ok()?.get(i - BUILT_IN.len()).copied()
+    }
+}
+
 pub fn current() -> &'static Theme {
-    ALL[CURRENT.load(Ordering::Relaxed) % ALL.len()]
+    get(CURRENT.load(Ordering::Relaxed)).unwrap_or(&GRAY)
 }
 
-pub fn next() {
-    CURRENT.store((CURRENT.load(Ordering::Relaxed) + 1) % ALL.len(), Ordering::Relaxed);
+pub fn built_in_names() -> Vec<&'static str> {
+    BUILT_IN.iter().map(|t| t.name).collect()
 }
 
-pub fn set(name: &str) {
-    let i = ALL.iter().position(|t| t.name.eq_ignore_ascii_case(name)).unwrap_or(0);
-    CURRENT.store(i, Ordering::Relaxed);
+/// Make the theme with this name current. Returns false if no such theme is loaded.
+pub fn set(name: &str) -> bool {
+    let n = BUILT_IN.len() + LOADED.read().map(|l| l.len()).unwrap_or(0);
+    match (0..n).find(|&i| get(i).is_some_and(|t| t.name.eq_ignore_ascii_case(name))) {
+        Some(i) => {
+            CURRENT.store(i, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Add a theme (or replace the one with the same name) and make it current.
+pub fn install(t: Theme) {
+    let t: &'static Theme = Box::leak(Box::new(t));
+    let Ok(mut l) = LOADED.write() else { return };
+    let i = match l.iter().position(|x| x.name == t.name) {
+        Some(i) => {
+            l[i] = t;
+            i
+        }
+        None => {
+            l.push(t);
+            l.len() - 1
+        }
+    };
+    CURRENT.store(BUILT_IN.len() + i, Ordering::Relaxed);
 }

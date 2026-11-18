@@ -45,6 +45,7 @@ fn build(i: usize) -> Vec<Option<Item>> {
         0 => vec![
             item("View", "F3", Cmd::View),
             item("Edit", "F4", Cmd::Edit),
+            item("Edit new file", "Shift+F4", Cmd::NewFile),
             item("Copy", "F5", Cmd::Copy),
             item("Rename/Move", "F6", Cmd::Move),
             item("Rename in place", "Shift+F6", Cmd::Rename),
@@ -59,16 +60,22 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Exit", "Alt+X", Cmd::Quit),
         ],
         1 => vec![
-            item("Change drive", "Alt+F1", Cmd::DriveActive),
-            item("Change drive (other panel)", "Alt+F2", Cmd::DriveOther),
+            item("Drives and favourites", "Alt+F1", Cmd::DriveActive),
+            item("... for the other panel", "Alt+F2", Cmd::DriveOther),
+            item("Add folder to favourites", "Ctrl+D", Cmd::AddFavorite),
             item("Directory tree", "Alt+F10", Cmd::Tree),
+            item("Find files", "Alt+F7", Cmd::Find),
             None,
             item("Folder sizes", "F3 on dir", Cmd::FolderSizes),
             item("Compare directories", "", Cmd::Compare),
+            item("Compare files", "Shift+F3", Cmd::CompareFiles),
+            item("Git diff with HEAD", "Alt+F3", Cmd::GitDiff),
         ],
         2 => vec![
+            item("Developer tools", "F2", Cmd::Tools),
             item("Calculator", "Ctrl+F2", Cmd::Calculator),
-            item("Falling Blocks game", "", Cmd::Game),
+            item("System monitor", "Alt+F5", Cmd::SysMon),
+            item("Orthodox game", "Ctrl+G", Cmd::Game),
             None,
             item("User screen", "Ctrl+O", Cmd::UserScreen),
         ],
@@ -84,15 +91,15 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Hidden files on/off", "Ctrl+H", Cmd::Hidden),
             item("Re-read", "Ctrl+R", Cmd::Reread),
             None,
-            item("Two panels", "Ctrl+N", Cmd::NewPanel),
-            item("One panel (hide this one)", "Ctrl+W", Cmd::ClosePanel),
+            item("One / two panels", "Ctrl+P", Cmd::TogglePanel),
             item("Wider", "Ctrl+→", Cmd::Wider),
             item("Narrower", "Ctrl+←", Cmd::Narrower),
-            item("Equal widths", "Ctrl+E", Cmd::EqualWidths),
+            item("Equal widths", "", Cmd::EqualWidths),
             item("Swap with other panel", "Ctrl+U", Cmd::Swap),
+            item("Preview in other panel", "Ctrl+L", Cmd::Preview),
         ],
         _ => vec![
-            item(format!("Color scheme: {}", theme::current().name), "Ctrl+T", Cmd::NextTheme),
+            item(format!("Colour theme: {}", theme::current().name), "Ctrl+T", Cmd::NextTheme),
             None,
             item("Help", "F1", Cmd::Help),
             item("About", "", Cmd::About),
@@ -177,7 +184,7 @@ pub fn run(app: &mut App, start: usize) -> Option<Cmd> {
                     }
                 },
                 KeyCode::Enter => return items[sel].as_ref().map(|i| i.cmd),
-                KeyCode::Esc | KeyCode::F(9) | KeyCode::F(10) => return None,
+                KeyCode::Esc => return None,
                 KeyCode::Char(c) => {
                     let hit = items.iter().flatten().find(|it| it.label.chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c)));
                     if let Some(it) = hit {
@@ -186,7 +193,7 @@ pub fn run(app: &mut App, start: usize) -> Option<Cmd> {
                 }
                 _ => {}
             },
-            Input::Tick => {}
+            Input::Tick | Input::Paste(_) => {}
         }
     }
 }

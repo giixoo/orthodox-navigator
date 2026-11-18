@@ -71,7 +71,9 @@ pub fn copy_or_move(app: &mut App, mv: bool) {
         if c.cancel {
             break;
         }
-        let dst = if into_dir { full.join(&e.name) } else { full.clone() };
+        // the file's own name (in search results `name` is a relative path)
+        let own = e.path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| e.name.clone().into());
+        let dst = if into_dir { full.join(own) } else { full.clone() };
         let skips = c.skips;
         let r = if mv { move_entry(app, &mut c, &e.path, &dst, e.is_dir) } else { copy_entry(app, &mut c, &e.path, &dst, e.is_dir, true) };
         if let Err(msg) = r {

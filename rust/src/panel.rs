@@ -89,7 +89,16 @@ pub struct Panel {
     pub quick_pos: (i32, i32),
     pub arc: Option<ArcView>,
     geom: Geom,
+    /// git status mark per name (see git::status)
+    pub git: std::collections::HashMap<String, char>,
+    /// the git branch checked out here, if the folder is in a repository
+    pub branch: Option<String>,
+    /// Showing search results (Alt+F7) instead of the folder; the text describes the search.
+    pub found: Option<String>,
 }
+
+/// Narrowest a name column may get, in characters.
+const MIN_COL: i32 = 20;
 
 const EXEC_EXT: &[&str] = &[".exe", ".com", ".bat", ".cmd", ".ps1", ".msi", ".sh"];
 const ARCHIVE_EXT: &[&str] = &[".zip", ".rar", ".7z", ".arj", ".gz", ".tar", ".cab", ".lzh", ".tgz", ".ha", ".xz", ".bz2", ".zst"];
@@ -130,17 +139,8 @@ fn color_of(e: &Entry) -> C {
     }
 }
 
-/// Name with the extension in its own 3-char column on the right, as DN showed 8.3 names.
+/// The full file name, cut to the column width.
 fn show_name(e: &Entry, w: usize) -> String {
-    if !e.is_dir {
-        if let Some(i) = e.name.rfind('.') {
-            let ext = &e.name[i + 1..];
-            let ext_len = ext.chars().count();
-            if i > 0 && (1..=3).contains(&ext_len) && w >= 8 {
-                return format!("{} {}", fit(&e.name[..i], w - 4), fit(ext, 3));
-            }
-        }
-    }
     fit(&e.name, w)
 }
 
@@ -173,6 +173,9 @@ impl Panel {
             quick_pos: (0, 0),
             arc: None,
             geom: Geom::default(),
+            git: Default::default(),
+            branch: None,
+            found: None,
         }
     }
 
@@ -206,6 +209,7 @@ impl Panel {
             return false;
         }
         self.arc = None;
+        self.found = None;
         self.dir = full;
         self.items.clear();
         self.top = 0;
@@ -221,6 +225,12 @@ impl Panel {
         self.error = None;
         if self.arc.is_some() {
             self.load_archive(focus, &keep);
+            return;
+        }
+        if self.found.is_some() {
+            // search results: drop what no longer exists
+            self.items.retain(|e| e.is_up || e.path.exists());
+            self.clamp();
             return;
         }
 
@@ -271,6 +281,8 @@ impl Panel {
             Err(e) => self.error = Some(e.to_string()),
         }
 
+        self.git = crate::git::status(&self.dir);
+        self.branch = crate::git::branch(&self.dir);
         self.free = platform::free_space(&self.dir);
         self.volume = platform::volume_of(&self.dir);
         self.items = list;
@@ -369,6 +381,8 @@ impl Panel {
                 arc: Some(inner),
             });
         }
+        self.git = crate::git::status(&self.dir);
+        self.branch = crate::git::branch(&self.dir);
         self.free = platform::free_space(&self.dir);
         self.volume = platform::volume_of(&self.dir);
         self.items = list;
@@ -378,7 +392,42 @@ impl Panel {
     }
 
     /// The path shown in the title: the folder, or "archive.zip/inner/path" inside an archive.
+    /// Show search results (paths relative to this panel's folder) instead of the folder.
+    pub fn set_results(&mut self, title: String, results: Vec<Entry>) {
+        let mut list = vec![Entry {
+            name: "..".into(),
+            path: self.dir.clone(),
+            is_dir: true,
+            is_up: true,
+            is_link: false,
+            selected: false,
+            size: None,
+            modified: None,
+            hidden: false,
+            exec: false,
+            arc: None,
+        }];
+        list.extend(results);
+        self.arc = None;
+        self.found = Some(title);
+        self.items = list;
+        self.git.clear();
+        self.apply_sort();
+        self.top = 0;
+        self.cursor = 0;
+        self.clamp();
+    }
+
+    /// Leave search results, back to the folder.
+    pub fn close_results(&mut self) {
+        self.found = None;
+        self.load(None);
+    }
+
     pub fn title_path(&self) -> String {
+        if let Some(f) = &self.found {
+            return f.clone();
+        }
         match &self.arc {
             Some(av) => {
                 let inner = av.prefix.trim_end_matches('/').replace('/', std::path::MAIN_SEPARATOR_STR);
@@ -514,6 +563,25 @@ impl Panel {
 
     // ------------------------------------------------------------------ drawing
 
+    /// Git status at the right end of the name: M modified, A added, ? new, U conflict, • changes inside.
+    fn draw_git_mark(&self, s: &mut Screen, e: &Entry, x: i32, y: i32, cur: bool, bg: C) {
+        if self.arc.is_some() || e.is_up {
+            return;
+        }
+        let Some(&m) = self.git.get(&e.name) else { return };
+        let th = theme::current();
+        let fg = if cur {
+            th.cursor_fg
+        } else {
+            match m {
+                '?' | 'A' => th.syn_string,
+                'U' | 'D' => th.error,
+                _ => th.syn_type,
+            }
+        };
+        s.put(x, y, m, fg, bg);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, s: &mut Screen, x: i32, y: i32, w: i32, h: i32, active: bool, quick: Option<&str>) {
         let th = theme::current();
@@ -542,26 +610,36 @@ impl Panel {
 
         if self.view == ViewMode::Full {
             self.cols = 1;
+            // the name keeps at least MIN_COL; Time goes first, then Date, then Size
             let (mut size_w, mut date_w, mut time_w) = (10, 8, 5);
-            let mut name_w = iw - size_w - date_w - time_w - 3;
-            if name_w < 8 {
-                name_w = iw;
-                size_w = 0;
-                date_w = 0;
+            let used = |a: i32, b: i32, c: i32| [a, b, c].iter().filter(|&&v| v > 0).map(|v| v + 1).sum::<i32>();
+            if iw - used(size_w, date_w, time_w) < MIN_COL {
                 time_w = 0;
             }
+            if iw - used(size_w, date_w, time_w) < MIN_COL {
+                date_w = 0;
+            }
+            if iw - used(size_w, date_w, time_w) < MIN_COL {
+                size_w = 0;
+            }
+            let name_w = iw - used(size_w, date_w, time_w);
             let nx = x + 1;
             let sx = nx + name_w + 1;
             let dx = sx + size_w + 1;
             let tx = dx + date_w + 1;
+            let lines: Vec<i32> = [(size_w, sx), (date_w, dx), (time_w, tx)].iter().filter(|c| c.0 > 0).map(|c| c.1 - 1).collect();
             self.geom.cols.push((x + 1, iw));
             header(s, nx, name_w, "Name");
+            for &vx in &lines {
+                column_line(s, vx);
+            }
             if size_w > 0 {
-                for vx in [sx - 1, dx - 1, tx - 1] {
-                    column_line(s, vx);
-                }
                 header(s, sx, size_w, "Size");
+            }
+            if date_w > 0 {
                 header(s, dx, date_w, "Date");
+            }
+            if time_w > 0 {
                 header(s, tx, time_w, "Time");
             }
             for r in 0..self.rows {
@@ -572,23 +650,29 @@ impl Panel {
                 let fg = if e.selected { th.selected } else if cur { th.cursor_fg } else { color_of(e) };
                 let ry = list_top + r as i32;
                 s.text(nx, ry, &show_name(e, name_w as usize), fg, rbg);
+                self.draw_git_mark(s, e, nx + name_w - 1, ry, cur, rbg);
                 if size_w > 0 {
                     s.text(sx, ry, &pad_left(&size_text(e, size_w as usize), size_w as usize), fg, rbg);
-                    let (d, t) = match e.modified {
-                        Some(m) => (m.format("%d-%m-%y").to_string(), m.format("%H:%M").to_string()),
-                        None => (String::new(), String::new()),
-                    };
+                }
+                let (d, t) = match e.modified {
+                    Some(m) => (m.format("%d-%m-%y").to_string(), m.format("%H:%M").to_string()),
+                    None => (String::new(), String::new()),
+                };
+                if date_w > 0 {
                     s.text(dx, ry, &pad_left(&d, date_w as usize), fg, rbg);
+                }
+                if time_w > 0 {
                     s.text(tx, ry, &pad_left(&t, time_w as usize), fg, rbg);
-                    if cur {
-                        for vx in [sx - 1, dx - 1, tx - 1] {
-                            s.put(vx, ry, '│', th.cursor_fg, rbg);
-                        }
+                }
+                if cur {
+                    for &vx in &lines {
+                        s.put(vx, ry, '│', th.cursor_fg, rbg);
                     }
                 }
             }
         } else {
-            self.cols = if iw >= 36 { 3 } else if iw >= 20 { 2 } else { 1 };
+            // as many columns as fit at MIN_COL each (with a line between), at most 3
+            self.cols = ((iw + 1) / (MIN_COL + 1)).clamp(1, 3) as usize;
             let cols = self.cols as i32;
             let cw = (iw - (cols - 1)) / cols;
             for c in 0..cols {
@@ -606,13 +690,23 @@ impl Panel {
                     let rbg = if cur { th.cursor_bg } else { bg };
                     let fg = if e.selected { th.selected } else if cur { th.cursor_fg } else { color_of(e) };
                     s.text(cx, list_top + r as i32, &show_name(e, width.max(0) as usize), fg, rbg);
+                    self.draw_git_mark(s, e, cx + width - 1, list_top + r as i32, cur, rbg);
                 }
+            }
+        }
+
+        let iwu = iw.max(0) as usize;
+        // git branch, on the right of the separator line
+        if let Some(b) = self.branch.as_ref().filter(|_| self.found.is_none()) {
+            let label = format!(" git: {} ", fit(b, iwu.saturating_sub(12).max(1)).trim_end());
+            let lx = x + w - 2 - label.chars().count() as i32;
+            if lx > x + 1 {
+                s.text(lx, sep_y, &label, th.info, bg);
             }
         }
 
         // info line 1: the file under the cursor
         let info_y = sep_y + 1;
-        let iwu = iw.max(0) as usize;
         if let Some(ce) = self.current() {
             let mut right = if ce.is_up {
                 "<UP-DIR>".to_string()
@@ -717,7 +811,7 @@ impl Panel {
         // quick search box
         if let Some(q) = quick {
             let text = format!(" Search: {q} ");
-            s.text(x + 2, y + h - 1, &text, C::Black, C::Cyan);
+            s.text(x + 2, y + h - 1, &text, theme::current().bar_fg, theme::current().bar_bg);
             self.quick_pos = (x + 2 + text.chars().count() as i32 - 1, y + h - 1);
         }
     }

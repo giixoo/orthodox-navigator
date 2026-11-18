@@ -1,6 +1,6 @@
 [package]
 name = "on"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/giixoo/orthodox-navigator"
@@ -16,12 +16,42 @@ ctrlc = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
+regex = "1"
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+sysinfo = "0.40.4"
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Linux packages (.github/workflows/release.yml): cargo deb / cargo generate-rpm
+[package.metadata.deb]
+name = "orthodox-navigator"
+maintainer = "giixoo <giixoo@users.noreply.github.com>"
+section = "utils"
+extended-description = """\
+A two-panel console file manager in the spirit of DOS Navigator, with developer tools: viewer and \
+editor with syntax colours, git status and diff, JSON/JWT/Base64 tools, system monitor. \
+Add 'source /usr/share/orthodox-navigator/on.sh' to ~/.bashrc or ~/.zshrc and type 'on'."""
+assets = [
+    ["target/release/on", "usr/bin/", "755"],
+    ["../shell/on.sh", "usr/share/orthodox-navigator/", "644"],
+    ["../README.md", "usr/share/doc/orthodox-navigator/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "orthodox-navigator"
+assets = [
+    { source = "target/release/on", dest = "/usr/bin/on", mode = "755" },
+    { source = "../shell/on.sh", dest = "/usr/share/orthodox-navigator/on.sh", mode = "644" },
+    { source = "../README.md", dest = "/usr/share/doc/orthodox-navigator/README.md", mode = "644", doc = true },
+    { source = "../LICENSE", dest = "/usr/share/licenses/orthodox-navigator/LICENSE", mode = "644" },
+]
 
 [profile.release]
 opt-level = 3
