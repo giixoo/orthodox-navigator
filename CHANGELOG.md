@@ -10,6 +10,8 @@ and push a tag `vX.Y.Z` (see "Install a release" in the README); the section bec
 
 - Shift+↑ ↓ PgUp PgDn Home End (and ← → in the brief view) select the files the cursor passes over, like Insert;
   starting on a selected file unselects instead.
+- macOS release: one universal binary (Apple silicon and Intel), alone or in a `.tar.gz` with the shell
+  function. CI also tests on macOS.
 
 ### Changed
 

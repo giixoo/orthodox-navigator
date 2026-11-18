@@ -23,11 +23,14 @@ The [Releases](https://github.com/giixoo/orthodox-navigator/releases) page has, 
 - **Linux x64 / arm64**: `.deb`, `.rpm`, `.tar.gz`, or just the program. The Linux build is static, so it
   runs on any distribution. After installing a package, add `source /usr/share/orthodox-navigator/on.sh`
   to `~/.bashrc` or `~/.zshrc`.
+- **macOS** (Apple silicon and Intel in one binary): `.tar.gz` (program and shell function) or just the
+  program. It isn't signed, so after downloading run `xattr -d com.apple.quarantine <file>` (or allow it in
+  System Settings → Privacy & Security). Unpack, then add `source <folder>/shell/on.sh` to `~/.zshrc`.
 
 To make a release, add the version's section to [CHANGELOG.md](CHANGELOG.md) (it becomes the release
 notes) and push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The workflow in
-[.github/workflows/release.yml](.github/workflows/release.yml) sets that version, builds and tests on Windows
-and Linux, and publishes the files. It can also be started by hand (Actions → Release → Run workflow); the
+[.github/workflows/release.yml](.github/workflows/release.yml) sets that version, builds and tests on Windows,
+Linux and macOS, and publishes the files. It can also be started by hand (Actions → Release → Run workflow); the
 files are then on the run's page.
 
 ## Start it from your shell
