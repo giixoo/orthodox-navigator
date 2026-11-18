@@ -6,6 +6,8 @@ and push a tag `vX.Y.Z` (see "Install a release" in the README); the section bec
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+
 ### Added
 
 - Shift+↑ ↓ PgUp PgDn Home End (and ← → in the brief view) select the files the cursor passes over, like Insert;
