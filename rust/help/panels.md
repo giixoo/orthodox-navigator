@@ -40,6 +40,7 @@ F5, F6 and F8 work on the selected files, or on the one under the cursor when no
 | Key | What it does |
 |---|---|
 | **Insert** | select / unselect the file under the cursor |
+| **Shift+↑ ↓ PgUp PgDn Home End** | select the files the cursor passes over; starting on a selected file unselects them |
 | **Gray +  /  Gray -** | select / unselect files matching a mask |
 | **Gray \*** | invert the selection |
 | **Right click** | select / unselect |

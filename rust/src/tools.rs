@@ -35,22 +35,62 @@ enum Tool {
     Password,
 }
 
-const TOOLS: [(Tool, &str, Option<&str>); 15] = [
-    (Tool::B64Enc, "Base64 encode", None),
-    (Tool::B64Dec, "Base64 decode", None),
-    (Tool::UrlEnc, "URL encode", None),
-    (Tool::UrlDec, "URL decode", None),
-    (Tool::JsonEsc, "String escape (JSON)", None),
-    (Tool::JsonUnesc, "String unescape (JSON)", None),
-    (Tool::HtmlEsc, "HTML/XML escape", None),
-    (Tool::HtmlUnesc, "HTML/XML unescape", None),
-    (Tool::JwtDecode, "JWT decode / verify", Some("Secret (to verify, optional)")),
-    (Tool::JwtSign, "JWT sign (HS256)", Some("Secret")),
-    (Tool::Sha256, "SHA-256 hash", None),
-    (Tool::Regex, "Regex tester", Some("Pattern")),
-    (Tool::Guid, "GUID generator", Some("Count, upper, braces, nodash")),
-    (Tool::Lorem, "Lorem ipsum", Some("Paragraphs, or e.g. 50w for words")),
-    (Tool::Password, "Password generator", Some("Length, count, nosym, noamb")),
+/// What a tool setting is: a text box, a number box or a check box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Text,
+    Number,
+    Check,
+}
+
+/// One setting of a tool, shown above Input.
+struct Field {
+    label: &'static str,
+    kind: Kind,
+    default: &'static str,
+    /// kept only while ON runs, never written to disk
+    secret: bool,
+}
+
+const fn text(label: &'static str) -> Field {
+    Field { label, kind: Kind::Text, default: "", secret: false }
+}
+
+const fn secret(label: &'static str) -> Field {
+    Field { label, kind: Kind::Text, default: "", secret: true }
+}
+
+const fn number(label: &'static str, default: &'static str) -> Field {
+    Field { label, kind: Kind::Number, default, secret: false }
+}
+
+const fn check(label: &'static str, on: bool) -> Field {
+    Field { label, kind: Kind::Check, default: if on { "1" } else { "0" }, secret: false }
+}
+
+const NONE: &[Field] = &[];
+
+/// Does the tool read Input? The generators don't: they get the whole height for Output.
+fn uses_input(t: Tool) -> bool {
+    !matches!(t, Tool::Guid | Tool::Lorem | Tool::Password)
+}
+
+const TOOLS: [(Tool, &str, &[Field]); 15] = [
+    (Tool::B64Enc, "Base64 encode", NONE),
+    (Tool::B64Dec, "Base64 decode", NONE),
+    (Tool::UrlEnc, "URL encode", NONE),
+    (Tool::UrlDec, "URL decode", NONE),
+    (Tool::JsonEsc, "String escape (JSON)", NONE),
+    (Tool::JsonUnesc, "String unescape (JSON)", NONE),
+    (Tool::HtmlEsc, "HTML/XML escape", NONE),
+    (Tool::HtmlUnesc, "HTML/XML unescape", NONE),
+    (Tool::JwtDecode, "JWT decode / verify", &[secret("Secret (to verify, optional)")]),
+    (Tool::JwtSign, "JWT sign (HS256)", &[secret("Secret")]),
+    (Tool::Sha256, "SHA-256 hash", NONE),
+    (Tool::Regex, "Regex tester", &[text("Pattern"), check("Ignore case", false), check("Multi-line", false)]),
+    (Tool::Guid, "GUID generator", &[number("Count", "1"), check("Upper case", false), check("Braces", false), check("No dashes", false)]),
+    (Tool::Lorem, "Lorem ipsum", &[number("Count", "3"), check("Words, not paragraphs", false)]),
+    (Tool::Password, "Password generator", &[number("Length", "20"), number("Count", "5"), check("Symbols", true), check("No look-alikes (Il1O0o)", false)]),
 ];
 
 enum Out {
@@ -61,7 +101,8 @@ enum Out {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     List,
-    Param,
+    /// the tool's n-th setting
+    Param(usize),
     Input,
     Output,
 }
@@ -536,16 +577,19 @@ fn random_below(n: usize) -> usize {
     }
 }
 
-/// Words of the option field: the numbers in order, and the rest lower-cased.
-fn options(param: &str) -> (Vec<usize>, Vec<String>) {
-    let (mut nums, mut words) = (vec![], vec![]);
-    for w in param.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()) {
-        match w.parse::<usize>() {
-            Ok(n) => nums.push(n),
-            Err(_) => words.push(w.to_lowercase()),
-        }
-    }
-    (nums, words)
+/// A number setting, or `default` when it is empty or not a number; kept within lo..=hi.
+fn num(v: &str, default: usize, lo: usize, hi: usize) -> usize {
+    v.trim().parse().unwrap_or(default).clamp(lo, hi)
+}
+
+/// Setting i of a tool as text ("" if missing).
+fn arg(v: &[String], i: usize) -> &str {
+    v.get(i).map_or("", |s| s.as_str())
+}
+
+/// Is check box i of a tool on?
+fn on(v: &[String], i: usize) -> bool {
+    v.get(i).is_some_and(|x| x == "1")
 }
 
 fn guid() -> String {
@@ -556,20 +600,17 @@ fn guid() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
-fn guids(param: &str) -> String {
-    let (nums, words) = options(param);
-    let count = nums.first().copied().unwrap_or(1).clamp(1, 10_000);
-    let has = |w: &str| words.iter().any(|x| x == w);
+fn guids(count: usize, upper: bool, braces: bool, nodash: bool) -> String {
     (0..count)
         .map(|_| {
             let mut g = guid();
-            if has("nodash") {
+            if nodash {
                 g.retain(|c| c != '-');
             }
-            if has("upper") {
+            if upper {
                 g = g.to_uppercase();
             }
-            if has("braces") {
+            if braces {
                 g = format!("{{{g}}}");
             }
             g
@@ -613,25 +654,21 @@ fn lorem_words(words: usize, first: bool) -> String {
     out
 }
 
-fn lorem(param: &str) -> String {
-    let p = param.trim().to_lowercase();
-    if let Some(n) = p.strip_suffix('w').and_then(|n| n.trim().parse::<usize>().ok()) {
-        return lorem_words(n.clamp(1, 100_000), true);
+/// `count` paragraphs, or `count` words.
+fn lorem(count: usize, words: bool) -> String {
+    if words {
+        return lorem_words(count, true);
     }
-    let paras = options(param).0.first().copied().unwrap_or(3).clamp(1, 1000);
-    (0..paras).map(|i| lorem_words(40 + random_below(40), i == 0)).collect::<Vec<_>>().join("\n\n")
+    (0..count).map(|i| lorem_words(40 + random_below(40), i == 0)).collect::<Vec<_>>().join("\n\n")
 }
 
-fn passwords(param: &str) -> String {
-    let (nums, words) = options(param);
-    let len = nums.first().copied().unwrap_or(20).clamp(4, 1024);
-    let count = nums.get(1).copied().unwrap_or(5).clamp(1, 10_000);
-    let has = |w: &str| words.iter().any(|x| x == w);
+/// `count` passwords of `len` characters: letters and digits, symbols if asked, without look-alikes if asked.
+fn passwords(len: usize, count: usize, symbols: bool, noamb: bool) -> String {
     let mut sets = vec!["abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "0123456789"];
-    if !has("nosym") {
+    if symbols {
         sets.push("!@#$%^&*()-_=+[]{};:,.?/~");
     }
-    let sets: Vec<Vec<char>> = sets.iter().map(|s| s.chars().filter(|c| !has("noamb") || !"Il1O0o".contains(*c)).collect()).collect();
+    let sets: Vec<Vec<char>> = sets.iter().map(|s| s.chars().filter(|c| !noamb || !"Il1O0o".contains(*c)).collect()).collect();
     let all: Vec<char> = sets.concat();
     let one = || {
         // one character from every set, the rest from all of them, then shuffled
@@ -649,7 +686,7 @@ fn passwords(param: &str) -> String {
     format!("{}\n\n{len} characters from {}, about {bits:.0} bits each", list.join("\n"), all.len())
 }
 
-fn run(tool: Tool, param: &str, input: &str, bytes: Option<&[u8]>, marks: &mut Vec<(usize, usize)>) -> Result<Out, String> {
+fn run(tool: Tool, p: &[String], input: &str, bytes: Option<&[u8]>, marks: &mut Vec<(usize, usize)>) -> Result<Out, String> {
     let raw = bytes.unwrap_or(input.as_bytes());
     Ok(match tool {
         Tool::B64Enc => Out::Text(crate::util::base64(raw)),
@@ -666,16 +703,24 @@ fn run(tool: Tool, param: &str, input: &str, bytes: Option<&[u8]>, marks: &mut V
         Tool::JsonUnesc => Out::Text(json_unescape(input)?),
         Tool::HtmlEsc => Out::Text(html_escape(input)),
         Tool::HtmlUnesc => Out::Text(html_unescape(input)),
-        Tool::JwtDecode => Out::Text(jwt_decode(input, param)?),
-        Tool::JwtSign => Out::Text(jwt_sign(input, param)?),
+        Tool::JwtDecode => Out::Text(jwt_decode(input, arg(p, 0))?),
+        Tool::JwtSign => Out::Text(jwt_sign(input, arg(p, 0))?),
         Tool::Sha256 => {
             let h = Sha256::digest(raw);
             Out::Text(format!("{}\n\n{} bytes", h.iter().map(|b| format!("{b:02x}")).collect::<String>(), n0(raw.len() as u64)))
         }
-        Tool::Regex => Out::Text(regex_test(param, input, marks)?),
-        Tool::Guid => Out::Text(guids(param)),
-        Tool::Lorem => Out::Text(lorem(param)),
-        Tool::Password => Out::Text(passwords(param)),
+        Tool::Regex => {
+            let flags = format!("{}{}", if on(p, 1) { "i" } else { "" }, if on(p, 2) { "m" } else { "" });
+            let pattern = arg(p, 0);
+            let full = if flags.is_empty() || pattern.is_empty() { pattern.to_string() } else { format!("(?{flags}){pattern}") };
+            Out::Text(regex_test(&full, input, marks)?)
+        }
+        Tool::Guid => Out::Text(guids(num(arg(p, 0), 1, 1, 10_000), on(p, 1), on(p, 2), on(p, 3))),
+        Tool::Lorem => {
+            let words = on(p, 1);
+            Out::Text(lorem(num(arg(p, 0), 3, 1, if words { 100_000 } else { 1000 }), words))
+        }
+        Tool::Password => Out::Text(passwords(num(arg(p, 0), 20, 4, 1024), num(arg(p, 1), 5, 1, 10_000), on(p, 2), on(p, 3))),
     })
 }
 
@@ -699,46 +744,161 @@ fn out_lines(out: &Result<Out, String>) -> Vec<String> {
 
 struct Layout {
     lw: i32,
-    param_y: Option<i32>,
+    /// (x, y, width) of each setting field
+    places: Vec<(i32, i32, i32)>,
     in_y: i32,
     in_h: i32,
     out_y: i32,
     out_h: i32,
 }
 
-fn layout(w: i32, h: i32, has_param: bool) -> Layout {
+fn field_width(f: &Field) -> i32 {
+    let l = f.label.chars().count() as i32;
+    match f.kind {
+        Kind::Check => l + 4,
+        Kind::Number => l + 2 + 7,
+        Kind::Text => l + 2 + 20,
+    }
+}
+
+/// Lay the fields out in rows from (x0, y0), `width` columns wide; text boxes take the spare width.
+fn field_places(fields: &[Field], x0: i32, y0: i32, width: i32) -> Vec<(i32, i32, i32)> {
+    const GAP: i32 = 3;
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0;
+    for (i, f) in fields.iter().enumerate() {
+        let w = field_width(f);
+        match rows.last_mut() {
+            Some(row) if used + GAP + w <= width => {
+                row.push(i);
+                used += GAP + w;
+            }
+            _ => {
+                rows.push(vec![i]);
+                used = w;
+            }
+        }
+    }
+    let mut out = vec![(0, 0, 0); fields.len()];
+    for (r, row) in rows.iter().enumerate() {
+        let natural: i32 = row.iter().map(|&i| field_width(&fields[i])).sum::<i32>() + GAP * (row.len() as i32 - 1);
+        let spare = (width - natural).max(0);
+        let texts = row.iter().filter(|&&i| fields[i].kind == Kind::Text).count() as i32;
+        let mut x = x0;
+        for &i in row {
+            let mut w = field_width(&fields[i]);
+            if fields[i].kind == Kind::Text && texts > 0 {
+                w += spare / texts;
+            }
+            let w = w.min(width);
+            out[i] = (x, y0 + r as i32, w);
+            x += w + GAP;
+        }
+    }
+    out
+}
+
+fn layout(w: i32, h: i32, fields: &[Field], input: bool) -> Layout {
     let lw = 26.min(w / 3);
-    let top = if has_param { 3 } else { 1 };
+    let places = field_places(fields, lw + 1, 2, w - lw - 2);
+    let top = places.iter().map(|p| p.1 + 2).max().unwrap_or(1);
     let avail = (h - 1 - top).max(6);
-    let in_h = avail / 2;
-    Layout { lw, param_y: has_param.then_some(1), in_y: top, in_h, out_y: top + in_h, out_h: avail - in_h }
+    let in_h = if input { avail / 2 } else { 0 };
+    Layout { lw, places, in_y: top, in_h, out_y: top + in_h, out_h: avail - in_h }
+}
+
+// ------------------------------------------------------------------ settings
+
+/// Secrets typed this run, by tool and field.
+static SECRETS: std::sync::Mutex<Vec<Vec<String>>> = std::sync::Mutex::new(Vec::new());
+
+fn settings_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    dirs::config_dir().map(|d| d.join("orthodox-navigator").join("tools.txt"))
+}
+
+/// Every tool's settings: from tools.txt ("Tool name.Field label=value"), defaults, and this run's secrets.
+fn load_settings() -> Vec<Vec<String>> {
+    let text = settings_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+    let secrets = SECRETS.lock().map(|s| s.clone()).unwrap_or_default();
+    TOOLS
+        .iter()
+        .enumerate()
+        .map(|(i, (_, name, fields))| {
+            fields
+                .iter()
+                .enumerate()
+                .map(|(j, f)| {
+                    if f.secret {
+                        return secrets.get(i).and_then(|v| v.get(j)).cloned().unwrap_or_default();
+                    }
+                    let key = format!("{name}.{}=", f.label);
+                    text.lines().find_map(|l| l.strip_prefix(&key)).map_or(f.default.to_string(), str::to_string)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn save_settings(values: &[Vec<String>]) {
+    if let Ok(mut s) = SECRETS.lock() {
+        *s = values.to_vec();
+    }
+    let Some(f) = settings_file() else { return };
+    let mut text = String::new();
+    for ((_, name, fields), vals) in TOOLS.iter().zip(values) {
+        for (f, v) in fields.iter().zip(vals).filter(|(f, _)| !f.secret) {
+            text.push_str(&format!("{name}.{}={v}\n", f.label));
+        }
+    }
+    let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
+    let _ = std::fs::write(f, text);
+}
+
+fn values(edits: &[LineEdit]) -> Vec<String> {
+    edits.iter().map(LineEdit::value).collect()
+}
+
+fn toggle(ed: &mut LineEdit) {
+    let v = if ed.value() == "1" { "0" } else { "1" };
+    ed.set(v);
 }
 
 /// Open the tools; `file` is the file under the panel cursor (offered by F3).
 pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
     let mut sel = 0usize;
     let mut focus = Focus::List;
-    let mut param = LineEdit::new("");
+    // every tool keeps its own settings (pattern, secret, generator options)
+    let mut edits: Vec<Vec<LineEdit>> = load_settings().iter().map(|v| v.iter().map(|s| LineEdit::new(s)).collect()).collect();
+    let mut saved: Vec<Vec<String>> = edits.iter().map(|e| values(e)).collect();
     let mut area = Area::new("");
     let mut bytes: Option<Vec<u8>> = None; // a binary file loaded with F3
     let mut out_top = 0usize;
     let mut marks = Vec::new();
-    let mut out = run(TOOLS[sel].0, "", "", None, &mut marks);
+    let mut out = run(TOOLS[sel].0, &values(&edits[sel]), "", None, &mut marks);
     let mut dirty = false;
 
     loop {
+        let now: Vec<Vec<String>> = edits.iter().map(|e| values(e)).collect();
+        if now != saved {
+            save_settings(&now);
+            saved = now;
+        }
         if dirty {
             marks.clear();
-            out = run(TOOLS[sel].0, &param.value(), &area.text(), bytes.as_deref(), &mut marks);
+            out = run(TOOLS[sel].0, &values(&edits[sel]), &area.text(), bytes.as_deref(), &mut marks);
             out_top = 0;
             dirty = false;
         }
-        let has_param = TOOLS[sel].2.is_some();
-        let lay = layout(app.screen.w, app.screen.h, has_param);
+        let fields = TOOLS[sel].2;
+        let input_on = uses_input(TOOLS[sel].0);
+        let lay = layout(app.screen.w, app.screen.h, fields, input_on);
         let lines = out_lines(&out);
         let failed = out.is_err();
         let (cur_sel, cur_focus, cur_top) = (sel, focus, out_top);
-        let (area_ref, param_ref, marks_ref, lines_ref) = (&mut area, &mut param, &marks, &lines);
+        let (area_ref, edits_ref, marks_ref, lines_ref) = (&mut area, &mut edits[sel], &marks, &lines);
         let binary = bytes.is_some();
         let inp = app.window_input(
             &mut |s| {
@@ -758,21 +918,36 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                     s.text(1, 2 + i as i32, &fit(&format!(" {name}"), (lay.lw - 2) as usize), fg, bg);
                 }
                 let (rx, rw) = (lay.lw, w - lay.lw);
-                // pattern / secret
-                if let (Some(py), Some(label)) = (lay.param_y, TOOLS[cur_sel].2) {
-                    let lab = format!(" {label}: ");
-                    let ll = lab.chars().count() as i32;
-                    s.text(rx + 1, py, &lab, t.header, t.panel_bg);
-                    param_ref.draw(s, rx + 1 + ll, py, rw - ll - 3, t.input_fg, t.input_bg);
-                    if cur_focus != Focus::Param {
-                        s.cursor = None;
+                // the tool's settings: text / number boxes and check boxes
+                let mut cursor = None;
+                for (j, (f, &(fx, fy, fw))) in fields.iter().zip(&lay.places).enumerate() {
+                    let focused = cur_focus == Focus::Param(j);
+                    let ed = &mut edits_ref[j];
+                    if f.kind == Kind::Check {
+                        let mark = if ed.value() == "1" { "[x]" } else { "[ ]" };
+                        s.text(fx, fy, mark, t.input_fg, t.input_bg);
+                        s.text(fx + 4, fy, &fit(f.label, (fw - 4).max(0) as usize), t.header, t.panel_bg);
+                        if focused {
+                            cursor = Some((fx + 1, fy));
+                        }
+                    } else {
+                        let lab = format!("{}: ", f.label);
+                        let ll = lab.chars().count() as i32;
+                        s.text(fx, fy, &lab, t.header, t.panel_bg);
+                        ed.draw(s, fx + ll, fy, fw - ll, t.input_fg, t.input_bg);
+                        if focused {
+                            cursor = s.cursor;
+                        }
                     }
                 }
+                s.cursor = cursor;
                 // input
-                s.boxed(rx, lay.in_y, rw, lay.in_h, t.frame, t.panel_bg, cur_focus == Focus::Input);
-                let ititle = if binary { " Input (binary file loaded) " } else { " Input " };
-                s.text(rx + 2, lay.in_y, ititle, t.header, t.panel_bg);
-                area_ref.draw(s, rx + 1, lay.in_y + 1, rw - 2, lay.in_h - 2, cur_focus == Focus::Input, marks_ref);
+                if lay.in_h > 0 {
+                    s.boxed(rx, lay.in_y, rw, lay.in_h, t.frame, t.panel_bg, cur_focus == Focus::Input);
+                    let ititle = if binary { " Input (binary file loaded) " } else { " Input " };
+                    s.text(rx + 2, lay.in_y, ititle, t.header, t.panel_bg);
+                    area_ref.draw(s, rx + 1, lay.in_y + 1, rw - 2, lay.in_h - 2, cur_focus == Focus::Input, marks_ref);
+                }
                 // output
                 s.boxed(rx, lay.out_y, rw, lay.out_h, t.frame, t.panel_bg, cur_focus == Focus::Output);
                 s.text(rx + 2, lay.out_y, " Output ", t.header, t.panel_bg);
@@ -785,7 +960,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                     let info = format!(" {}/{} ", (cur_top + oh).min(lines_ref.len()), lines_ref.len());
                     s.text(rx + rw - 2 - info.chars().count() as i32, lay.out_y + lay.out_h - 1, &info, t.frame, t.panel_bg);
                 }
-                draw_key_bar(s, &["Help", "Copy", "Load", "Swap", "Save", "New", "", "", "", ""]);
+                draw_key_bar(s, &["Help", "Copy", if input_on { "Load" } else { "" }, if input_on { "Swap" } else { "" }, "Save", "New", "", "", "", ""]);
             },
             None,
         );
@@ -794,12 +969,19 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
         let out_page = (lay.out_h - 2).max(1) as usize;
         match inp {
             Input::Paste(t) => {
-                if focus == Focus::Param {
-                    param.insert(&t.replace(['\r', '\n'], ""));
-                } else {
-                    focus = Focus::Input;
-                    area.insert(&t);
-                    bytes = None;
+                match focus {
+                    Focus::Param(j) if fields[j].kind != Kind::Check => {
+                        let t = t.replace(['\r', '\n'], "");
+                        let t: String = if fields[j].kind == Kind::Number { t.chars().filter(|c| c.is_ascii_digit()).collect() } else { t };
+                        edits[sel][j].insert(&t);
+                    }
+                    Focus::Param(_) => {}
+                    _ if !input_on => {}
+                    _ => {
+                        focus = Focus::Input;
+                        area.insert(&t);
+                        bytes = None;
+                    }
                 }
                 dirty = true;
             }
@@ -817,9 +999,13 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                                 dirty = true;
                             }
                             focus = Focus::List;
-                        } else if lay.param_y == Some(my) {
-                            focus = Focus::Param;
-                        } else if my >= lay.in_y && my < lay.in_y + lay.in_h {
+                        } else if let Some(j) = lay.places.iter().position(|&(fx, fy, fw)| my == fy && mx >= fx && mx < fx + fw) {
+                            focus = Focus::Param(j);
+                            if fields[j].kind == Kind::Check {
+                                toggle(&mut edits[sel][j]);
+                                dirty = true;
+                            }
+                        } else if lay.in_h > 0 && my >= lay.in_y && my < lay.in_y + lay.in_h {
                             focus = Focus::Input;
                             let y = area.top + (my - lay.in_y - 1).max(0) as usize;
                             area.cy = y.min(area.lines.len() - 1);
@@ -850,7 +1036,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                     Ok(Out::Bytes(_)) => dialogs::message(app, "Copy", "The output is binary; F5 saves it to a file.", false),
                     Err(_) => {}
                 },
-                KeyCode::F(3) => {
+                KeyCode::F(3) if input_on => {
                     let init = file.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                     if let Some(name) = dialogs::input(app, "Load into Input", "File:", &init) {
                         let p = dir.join(name.trim());
@@ -873,7 +1059,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                         }
                     }
                 }
-                KeyCode::F(4) => {
+                KeyCode::F(4) if input_on => {
                     match &out {
                         Ok(Out::Text(t)) => {
                             area.set(t);
@@ -910,11 +1096,12 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                 // the generators make new values; the others just run again
                 KeyCode::F(6) => dirty = true,
                 KeyCode::Tab | KeyCode::BackTab => {
-                    let order: Vec<Focus> = if TOOLS[sel].2.is_some() {
-                        vec![Focus::List, Focus::Param, Focus::Input, Focus::Output]
-                    } else {
-                        vec![Focus::List, Focus::Input, Focus::Output]
-                    };
+                    let mut order = vec![Focus::List];
+                    order.extend((0..fields.len()).map(Focus::Param));
+                    if input_on {
+                        order.push(Focus::Input);
+                    }
+                    order.push(Focus::Output);
                     let i = order.iter().position(|f| *f == focus).unwrap_or(0);
                     let n = order.len();
                     focus = order[if k.code == KeyCode::Tab { (i + 1) % n } else { (i + n - 1) % n }];
@@ -929,14 +1116,31 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                             sel = (sel + 1) % TOOLS.len();
                             dirty = true;
                         }
-                        KeyCode::Enter => focus = if TOOLS[sel].2.is_some() { Focus::Param } else { Focus::Input },
+                        KeyCode::Enter => focus = if !fields.is_empty() { Focus::Param(0) } else if input_on { Focus::Input } else { Focus::Output },
                         _ => {}
                     },
-                    Focus::Param => {
-                        if k.code == KeyCode::Enter {
-                            focus = Focus::Input;
-                        } else if param.handle(&k) {
-                            dirty = true;
+                    Focus::Param(j) => {
+                        let ed = &mut edits[sel][j];
+                        match (fields[j].kind, k.code) {
+                            // Space / Enter: tick or untick
+                            (Kind::Check, KeyCode::Char(' ') | KeyCode::Enter) => {
+                                toggle(ed);
+                                dirty = true;
+                            }
+                            (Kind::Check, _) => {}
+                            (_, KeyCode::Enter) => focus = if input_on { Focus::Input } else { Focus::Output },
+                            // ↑ ↓ change a number by one
+                            (Kind::Number, KeyCode::Up | KeyCode::Down) => {
+                                let n = ed.value().trim().parse::<i64>().unwrap_or(0) + if k.code == KeyCode::Up { 1 } else { -1 };
+                                ed.set(&n.max(0).to_string());
+                                dirty = true;
+                            }
+                            (Kind::Number, KeyCode::Char(c)) if !c.is_ascii_digit() => {}
+                            _ => {
+                                if ed.handle(&k) {
+                                    dirty = true;
+                                }
+                            }
                         }
                     }
                     Focus::Input => {
@@ -958,8 +1162,14 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
             },
         }
         // a different tool keeps the input, so switching tools recomputes
-        if focus == Focus::Param && TOOLS[sel].2.is_none() {
-            focus = Focus::Input;
+        let input_now = uses_input(TOOLS[sel].0);
+        if let Focus::Param(j) = focus {
+            if j >= TOOLS[sel].2.len() {
+                focus = if input_now { Focus::Input } else { Focus::Output };
+            }
+        }
+        if focus == Focus::Input && !input_now {
+            focus = Focus::Output;
         }
     }
 }
@@ -970,20 +1180,40 @@ mod tests {
 
     #[test]
     fn generators() {
-        let g = guids("3 upper braces");
+        let g = guids(3, true, true, false);
         let lines: Vec<&str> = g.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|l| l.len() == 38 && l.starts_with('{') && l.as_bytes()[15] == b'4'));
         assert_ne!(lines[0], lines[1]);
-        assert_eq!(guids("nodash").len(), 32);
-        let p = passwords("12 4 nosym noamb");
+        assert_eq!(guids(1, false, false, true).len(), 32);
+        let p = passwords(12, 4, false, true);
         let pw: Vec<&str> = p.lines().take(4).collect();
         assert!(pw.iter().all(|x| x.chars().count() == 12 && x.chars().all(|c| c.is_ascii_alphanumeric() && !"Il1O0o".contains(c))));
         assert!(pw.iter().all(|x| x.chars().any(|c| c.is_ascii_digit()) && x.chars().any(|c| c.is_ascii_uppercase())));
-        let l = lorem("25w");
+        let l = lorem(25, true);
         assert!(l.starts_with("Lorem ipsum dolor sit amet"));
         assert_eq!(l.split_whitespace().count(), 25);
-        assert_eq!(lorem("2").split("\n\n").count(), 2);
+        assert_eq!(lorem(2, false).split("\n\n").count(), 2);
+    }
+
+    #[test]
+    fn settings_and_fields() {
+        // no settings file in tests: every field starts at its default
+        let all = load_settings();
+        let pw = TOOLS.iter().position(|t| t.0 == Tool::Password).unwrap();
+        assert_eq!(all[pw], ["20", "5", "1", "0"]);
+        let out = run(Tool::Password, &all[pw], "", None, &mut vec![]).ok().unwrap();
+        let Out::Text(t) = out else { panic!() };
+        assert_eq!(t.lines().take_while(|l| !l.is_empty()).count(), 5);
+        // check boxes share a row with the number boxes when there is room, wrap when not
+        let wide = field_places(TOOLS[pw].2, 0, 1, 200);
+        assert!(wide.iter().all(|p| p.1 == 1));
+        let narrow = field_places(TOOLS[pw].2, 0, 1, 30);
+        assert!(narrow.iter().map(|p| p.1).max().unwrap() > 1);
+        // regex flags
+        let mut marks = vec![];
+        let rx = run(Tool::Regex, &["abc".into(), "1".into(), "0".into()], "ABC", None, &mut marks).ok().unwrap();
+        assert!(matches!(rx, Out::Text(t) if t.starts_with("1 match")));
     }
 
     #[test]

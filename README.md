@@ -106,6 +106,7 @@ other systems don't tell programs about a modifier pressed on its own). Esc clos
 | Ctrl+L | preview in the other panel |
 | Enter | open, run or browse an archive (on `..`: the folder above) |
 | Insert, Gray + − * | select file / select group / unselect group / invert |
+| Shift+↑ ↓ PgUp PgDn Home End | select the files the cursor passes over (on a selected file: unselect) |
 | Alt+letter | quick search |
 | F2 | developer tools |
 | F3 / Shift+F3 / Alt+F3 | view (on a folder: its size) / compare with the other panel / git diff with HEAD |
