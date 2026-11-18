@@ -35,6 +35,11 @@ impl LineEdit {
         self.text.iter().collect()
     }
 
+    /// Cursor position, in characters.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -174,6 +179,10 @@ fn is_left_click(i: &Input) -> Option<(i32, i32)> {
 }
 
 pub fn input(app: &mut App, title: &str, prompt: &str, initial: &str) -> Option<String> {
+    app.over(|app| input_over(app, title, prompt, initial))
+}
+
+fn input_over(app: &mut App, title: &str, prompt: &str, initial: &str) -> Option<String> {
     let mut ed = LineEdit::new(initial);
     loop {
         let w = (app.screen.w - 4).min(64.max(prompt.chars().count() as i32 + 10));
@@ -209,6 +218,10 @@ pub fn input(app: &mut App, title: &str, prompt: &str, initial: &str) -> Option<
 /// Message box with buttons. Returns the button index, or None on Esc.
 /// A button's hotkey is its first upper-case letter ("sKip all" -> K). Buttons are clickable.
 pub fn choice(app: &mut App, title: &str, lines: &[&str], buttons: &[&str], warn: bool) -> Option<usize> {
+    app.over(|app| choice_over(app, title, lines, buttons, warn))
+}
+
+fn choice_over(app: &mut App, title: &str, lines: &[&str], buttons: &[&str], warn: bool) -> Option<usize> {
     let mut sel = 0usize;
     const GAP: i32 = 2;
     let btn_w: i32 = buttons.iter().map(|b| button_width(b)).sum::<i32>() + GAP * (buttons.len() as i32 - 1) + 1;
@@ -269,72 +282,10 @@ pub fn message(app: &mut App, title: &str, text: &str, error: bool) {
     choice(app, title, &lines, &["OK"], error);
 }
 
-/// Vertical pick list. Returns the index, or None on Esc. Click picks, wheel scrolls.
-pub fn list_menu(app: &mut App, title: &str, items: &[String], initial: usize) -> Option<usize> {
-    if items.is_empty() {
-        return None;
-    }
-    let mut sel = initial.min(items.len() - 1);
-    let longest = items.iter().map(|i| i.chars().count()).max().unwrap_or(0) as i32;
-    loop {
-        let w = (app.screen.w - 2).min((title.chars().count() as i32 + 12).max(longest + 8));
-        let h = items.len() as i32 + 4;
-        let (x, y) = place(app.screen.w, app.screen.h, w, h);
-        let cur = sel;
-        let inp = app.modal_input(
-            &mut |s| {
-                let l = normal();
-                let t = theme::current();
-                draw_frame(s, x, y, w, h, title, &l);
-                for (i, item) in items.iter().enumerate() {
-                    let on = i == cur;
-                    let (fg, bg) = if on { (t.list_sel_fg, t.list_sel_bg) } else { (l.fg, l.bg) };
-                    s.text(x + 3, y + 2 + i as i32, &fit(&format!(" {item}"), (w - 6) as usize), fg, bg);
-                }
-            },
-            None,
-        );
-        match inp {
-            Input::Mouse(m) => {
-                let (mx, my) = (m.column as i32, m.row as i32);
-                match m.kind {
-                    MouseEventKind::ScrollUp => sel = sel.saturating_sub(1),
-                    MouseEventKind::ScrollDown => sel = (sel + 1).min(items.len() - 1),
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let row = my - y - 2;
-                        if mx >= x + 3 && mx < x + w - 3 && row >= 0 && (row as usize) < items.len() {
-                            return Some(row as usize);
-                        }
-                        if mx < x || mx >= x + w || my < y || my >= y + h || is_close_click(x, y, mx, my) {
-                            return None;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Input::Key(k) => match k.code {
-                KeyCode::Up => sel = (sel + items.len() - 1) % items.len(),
-                KeyCode::Down => sel = (sel + 1) % items.len(),
-                KeyCode::Home => sel = 0,
-                KeyCode::End => sel = items.len() - 1,
-                KeyCode::Enter => return Some(sel),
-                KeyCode::Esc => return None,
-                KeyCode::Char(c) => {
-                    if let Some(i) = items.iter().position(|it| it.trim_start().chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))) {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            },
-            Input::Tick => {}
-        }
-    }
-}
-
 /// Draw a non-interactive progress box once (used during long operations).
 pub fn progress(app: &mut App, title: &str, lines: &[String]) {
     app.screen.resize();
-    app.draw_base();
+    app.draw_backdrop();
     let s = &mut app.screen;
     let w = (s.w - 2).min(70);
     let h = lines.len() as i32 + 5;

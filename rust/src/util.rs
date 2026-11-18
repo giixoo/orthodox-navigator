@@ -197,3 +197,53 @@ mod tests {
         assert!(same_path(&base.join("a").join(".."), &base));
     }
 }
+
+/// UTF-16 text (what PowerShell's `>` and many Windows tools write): the encoding, and the length of its
+/// byte-order mark (0 if there is none and it was recognised by the zero bytes of mostly-ASCII text).
+pub fn sniff_utf16(data: &[u8]) -> Option<(&'static encoding_rs::Encoding, usize)> {
+    if data.starts_with(&[0xFF, 0xFE]) {
+        return Some((encoding_rs::UTF_16LE, 2));
+    }
+    if data.starts_with(&[0xFE, 0xFF]) {
+        return Some((encoding_rs::UTF_16BE, 2));
+    }
+    let sample = &data[..data.len().min(4096) & !1];
+    if sample.len() < 8 {
+        return None;
+    }
+    let pairs = sample.len() / 2;
+    let even = sample.iter().step_by(2).filter(|&&b| b == 0).count();
+    let odd = sample.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    if odd * 10 > pairs * 3 && even * 20 < pairs {
+        Some((encoding_rs::UTF_16LE, 0))
+    } else if even * 10 > pairs * 3 && odd * 20 < pairs {
+        Some((encoding_rs::UTF_16BE, 0))
+    } else {
+        None
+    }
+}
+
+/// Encode text as UTF-16 (encoding_rs only decodes it).
+pub fn encode_utf16(text: &str, big_endian: bool) -> Vec<u8> {
+    text.encode_utf16().flat_map(|u| if big_endian { u.to_be_bytes() } else { u.to_le_bytes() }).collect()
+}
+
+#[cfg(test)]
+mod utf16_tests {
+    use super::*;
+
+    #[test]
+    fn sniffs_and_round_trips() {
+        let mut le = vec![0xFF, 0xFE];
+        le.extend(encode_utf16("-- Result set 1\r\nid  name\r\n", false));
+        assert_eq!(sniff_utf16(&le), Some((encoding_rs::UTF_16LE, 2)));
+        assert_eq!(sniff_utf16(&le[2..]), Some((encoding_rs::UTF_16LE, 0)));
+        let be = encode_utf16("plain ascii text here", true);
+        assert_eq!(sniff_utf16(&be), Some((encoding_rs::UTF_16BE, 0)));
+        assert_eq!(sniff_utf16(b"plain ascii text here"), None);
+        let (text, _, _) = encoding_rs::UTF_16LE.decode(&le);
+        assert_eq!(text, "-- Result set 1\r\nid  name\r\n");
+        // binary data with scattered zeros is not text
+        assert_eq!(sniff_utf16(&[0x4D, 0x5A, 0x90, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0xFF, 0xFF, 0, 0]), None);
+    }
+}

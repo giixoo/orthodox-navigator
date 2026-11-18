@@ -330,7 +330,7 @@ pub fn show(app: &mut App) -> Option<String> {
         let result = if ed.value().trim().is_empty() { Err(String::new()) } else { eval(&ed.value()) };
         let (cur_fmt, cur_focus) = (fmt, focus);
         let res = result.clone();
-        let input = app.modal_input(
+        let input = app.window_input(
             &mut |s: &mut Screen| {
                 let t = theme::current();
                 dialogs::frame_at(s, x, y, w, h, "Calculator");
@@ -343,7 +343,7 @@ pub fn show(app: &mut App) -> Option<String> {
                     s.cursor = None;
                 }
                 // results with the "copy as" choice
-                s.text(x + 4, y + 7, "Copy As", fg, bg);
+                s.text(x + 4, y + 6, "Copy as:", fg, bg);
                 s.boxed(x + 14, y + 6, w - 18, 7, t.dlg_frame, bg, false);
                 for (i, name) in FORMATS.iter().enumerate() {
                     let ry = y + 7 + i as i32;
@@ -387,6 +387,7 @@ pub fn show(app: &mut App) -> Option<String> {
         match input {
             Input::Key(k) => match k.code {
                 KeyCode::Esc => return None,
+                KeyCode::F(1) => crate::help::show(app, "calc"),
                 KeyCode::Tab => focus = (focus + 1) % 4,
                 KeyCode::BackTab => focus = (focus + 3) % 4,
                 KeyCode::Up => fmt = (fmt + FORMATS.len() - 1) % FORMATS.len(),
