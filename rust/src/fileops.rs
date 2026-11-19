@@ -41,6 +41,13 @@ pub fn copy_or_move(app: &mut App, mv: bool) {
         if mv { read_only(app) } else { extract_out(app) }
         return;
     }
+    // to the Temp panel: F5 puts the files on its list, nothing is copied
+    if app.passive_is_temp() {
+        if mv {
+            return dialogs::message(app, "Temp panel", "F5 adds files to the Temp panel; it can't hold moved files.", false);
+        }
+        return app.add_to_temp();
+    }
     let src = app.active().targets();
     if src.is_empty() {
         return;

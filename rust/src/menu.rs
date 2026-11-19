@@ -1,4 +1,4 @@
-//! DN-style pull-down menu (F9/F10, or click the top row). Fully clickable.
+//! DN-style pull-down menu (F10, or click the top row). Fully clickable.
 
 use crate::app::{draw_clock, App, Cmd, Input};
 use crate::panel::SortMode;
@@ -50,6 +50,7 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Rename/Move", "F6", Cmd::Move),
             item("Rename in place", "Shift+F6", Cmd::Rename),
             item("Batch rename", "Alt+F6", Cmd::BatchRename),
+            item("Attributes", "Ctrl+A", Cmd::Attributes),
             item("Make folder", "F7", Cmd::Mkdir),
             item("Delete to Trash", "F8", Cmd::Delete),
             item("Wipe (delete permanently)", "Shift+F8", Cmd::Wipe),
@@ -57,14 +58,17 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Select group", "Gray +", Cmd::SelectGroup),
             item("Unselect group", "Gray -", Cmd::UnselectGroup),
             item("Invert selection", "Gray *", Cmd::Invert),
+            item("Add to Temp panel", "F5 to it", Cmd::AddToTemp),
             None,
             item("Exit", "Alt+X", Cmd::Quit),
         ],
         1 => vec![
-            item("Drives and favourites", "Alt+F1", Cmd::DriveActive),
-            item("... for the other panel", "Alt+F2", Cmd::DriveOther),
+            item("Drives: left panel", "Alt+F1", Cmd::DriveLeft),
+            item("Drives: right panel", "Alt+F2", Cmd::DriveRight),
             item("Add folder to favourites", "Ctrl+D", Cmd::AddFavorite),
             item("Directory tree", "Alt+F10", Cmd::Tree),
+            item("Folder history", "Alt+BkSp", Cmd::FolderHistory),
+            item("Temp panel", "", Cmd::TempPanel),
             item("Find files", "Alt+F7", Cmd::Find),
             None,
             item("Folder sizes", "F3 on dir", Cmd::FolderSizes),
@@ -73,6 +77,7 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Git diff with HEAD", "Alt+F3", Cmd::GitDiff),
         ],
         2 => vec![
+            item("User menu", "F9", Cmd::UserMenu),
             item("Developer tools", "F2", Cmd::Tools),
             item("Calculator", "Ctrl+F2", Cmd::Calculator),
             item("System monitor", "Alt+F5", Cmd::SysMon),
@@ -90,6 +95,7 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Unsorted", "", Cmd::Sort(SortMode::Unsorted)),
             None,
             item("Hidden files on/off", "Ctrl+H", Cmd::Hidden),
+            item("Filter", "Ctrl+F", Cmd::Filter),
             item("Re-read", "Ctrl+R", Cmd::Reread),
             None,
             item("One / two panels", "Ctrl+P", Cmd::TogglePanel),
@@ -101,6 +107,9 @@ fn build(i: usize) -> Vec<Option<Item>> {
         ],
         _ => vec![
             item(format!("Colour theme: {}", theme::current().name), "Ctrl+T", Cmd::NextTheme),
+            item("File colours", "", Cmd::EditColors),
+            item("Commands for file types", "", Cmd::EditExtensions),
+            item("Global user menu", "", Cmd::EditGlobalMenu),
             None,
             item("Help", "F1", Cmd::Help),
             item("About", "", Cmd::About),

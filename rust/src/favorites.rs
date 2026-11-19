@@ -23,6 +23,8 @@ pub enum Pick {
     /// a drive / mount point (the panel may return to the last folder it had there)
     Volume(PathBuf),
     Folder(PathBuf),
+    /// the Temp panel
+    Temp,
 }
 
 fn file() -> Option<PathBuf> {
@@ -79,6 +81,7 @@ fn add_to(app: &mut App, favs: &mut Vec<Fav>, dir: &Path) -> bool {
 
 enum Row {
     Vol(PathBuf, String),
+    Temp,
     Sep,
     Fav(usize),
 }
@@ -105,13 +108,14 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
 
     loop {
         let mut rows: Vec<Row> = vol_rows.iter().map(|(p, l)| Row::Vol(p.clone(), l.clone())).collect();
+        rows.push(Row::Temp);
         rows.push(Row::Sep);
         rows.extend((0..favs.len()).map(Row::Fav));
         let sel_i = *sel.get_or_insert_with(|| {
             // start on the favourite we're in, else the current drive
             (0..favs.len())
                 .find(|&i| crate::util::same_path(&favs[i].path, current))
-                .map(|i| vol_rows.len() + 1 + i)
+                .map(|i| vol_rows.len() + 2 + i)
                 .or_else(|| vol_rows.iter().position(|(v, _)| platform::volume_of(v) == cur_vol && (cfg!(windows) || v != &platform::home())))
                 .unwrap_or(0)
         });
@@ -146,6 +150,11 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                             s.hline(x + 3, ry, w - 6, '─', t.dlg_fg, t.dlg_bg);
                             s.text(x + 5, ry, " Favourites  (F7 add, F4 edit, F8 remove) ", t.dlg_fg, t.dlg_bg);
                         }
+                        Row::Temp => {
+                            let n = crate::temp::load().len();
+                            let line = format!(" {:<w2$}{:>12} ", "Temp panel", format!("{n} items"), w2 = inner.saturating_sub(14));
+                            s.text(x + 3, ry, &fit(&line, inner), fg, bg);
+                        }
                         Row::Vol(_, label) => {
                             let (name, free) = label.split_once('\t').unwrap_or((label, ""));
                             let line = format!(" {:<w2$}{:>12} ", fit_left(name, inner.saturating_sub(14)), free, w2 = inner.saturating_sub(14));
@@ -176,6 +185,7 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
             match &rows[i] {
                 Row::Vol(p, _) => Some(Pick::Volume(p.clone())),
                 Row::Fav(k) => Some(Pick::Folder(favs[*k].path.clone())),
+                Row::Temp => Some(Pick::Temp),
                 Row::Sep => None,
             }
         };
@@ -225,7 +235,7 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                     KeyCode::End => sel = Some(rows.len() - 1),
                     KeyCode::F(7) => {
                         if add_to(app, &mut favs, current) {
-                            sel = Some(vol_rows.len() + favs.len());
+                            sel = Some(vol_rows.len() + 1 + favs.len());
                         }
                     }
                     KeyCode::Delete | KeyCode::F(8) => {
