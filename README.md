@@ -10,6 +10,24 @@ start it from (so you can rebuild while it is running):
     copy target\release\on.exe ..\bin\on.exe       # Windows
     mkdir -p ../bin && cp target/release/on ../bin/on   # Linux / macOS
 
+### Build on macOS
+
+There is no macOS release download, so build it yourself (Apple silicon or Intel):
+
+1. Install the command line tools (compiler and linker): `xcode-select --install`
+2. Install Rust: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then open a new terminal
+3. Get the source and build:
+
+        git clone https://github.com/giixoo/orthodox-navigator.git
+        cd orthodox-navigator/rust
+        cargo build --release
+        mkdir -p ../bin && cp target/release/on ../bin/on
+
+4. Add `source /path/to/orthodox-navigator/shell/on.sh` to `~/.zshrc`, open a new terminal and type `on`.
+
+To update later: `git pull`, then repeat the `cargo build` and `cp` lines. A binary built on the Mac itself
+needs no `xattr` or Gatekeeper approval.
+
 Works best in Windows Terminal or any terminal with 24-bit colour. Colours are sent as exact VGA values;
 set `ON_COLORS=16` to use the terminal's own 16-colour palette instead.
 
