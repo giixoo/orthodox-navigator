@@ -4,7 +4,7 @@ use crate::archive::{self, ArcEntry};
 use crate::platform;
 use crate::screen::{Screen, C};
 use crate::theme;
-use crate::util::{center, fit, fit_left, human, n0, normalize, pad_left, size_col};
+use crate::util::{center, fit, fit_left, human, n0, normalize, pad_left, size_col, wildcard};
 use chrono::{DateTime, Local};
 use std::collections::HashSet;
 use std::fs;
@@ -95,16 +95,16 @@ pub struct Panel {
     pub branch: Option<String>,
     /// Showing search results (Alt+F7) instead of the folder; the text describes the search.
     pub found: Option<String>,
+    /// Showing the Temp panel (a list of files from anywhere) rather than search results.
+    pub temp: bool,
+    /// Ctrl+F: show only files matching these masks (`-mask` hides); folders are always shown.
+    pub filter: Option<String>,
 }
 
 /// Narrowest a name column may get, in characters.
 const MIN_COL: i32 = 20;
 
 const EXEC_EXT: &[&str] = &[".exe", ".com", ".bat", ".cmd", ".ps1", ".msi", ".sh"];
-const ARCHIVE_EXT: &[&str] = &[".zip", ".rar", ".7z", ".arj", ".gz", ".tar", ".cab", ".lzh", ".tgz", ".ha", ".xz", ".bz2", ".zst"];
-const DOC_EXT: &[&str] = &[".txt", ".diz", ".doc", ".docx", ".md", ".me", ".nfo", ".rtf", ".pdf", ".htm", ".html", ".ini"];
-const IMAGE_EXT: &[&str] = &[".ico", ".bmp", ".gif", ".png", ".jpg", ".jpeg", ".pcx", ".svg", ".webp", ".tif"];
-const JUNK_EXT: &[&str] = &[".bak", ".tmp", ".log", ".old"];
 
 pub fn is_exec_name(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -122,25 +122,35 @@ fn color_of(e: &Entry) -> C {
     if e.hidden {
         return t.hidden;
     }
-    let ext = e.ext();
-    let ext = ext.as_str();
-    if e.exec || EXEC_EXT.contains(&ext) {
+    let own = e.name.rsplit(['/', '\\']).next().unwrap_or(&e.name);
+    if let Some(c) = crate::colors::of_name(own) {
+        c
+    } else if e.exec {
         t.exec
-    } else if ARCHIVE_EXT.contains(&ext) {
-        t.archive
-    } else if DOC_EXT.contains(&ext) {
-        t.doc
-    } else if IMAGE_EXT.contains(&ext) {
-        t.image
-    } else if JUNK_EXT.contains(&ext) {
-        t.junk
     } else {
         t.file
     }
 }
 
+/// Does a file name pass a panel filter: any of the masks, and none of the `-masks`?
+pub fn filter_passes(filter: &str, name: &str) -> bool {
+    let masks: Vec<&str> = filter.split([';', ',']).map(str::trim).filter(|m| !m.is_empty()).collect();
+    let (hide, show): (Vec<&str>, Vec<&str>) = masks.iter().partition(|m| m.starts_with('-'));
+    // "*.*" is every file, "*." the files without an extension
+    let one = |m: &str| match m {
+        "*.*" => true,
+        "*." => !name.chars().skip(1).any(|c| c == '.'),
+        _ => wildcard(m, name),
+    };
+    (show.is_empty() || show.iter().any(|m| one(m))) && !hide.iter().any(|m| one(&m[1..]))
+}
+
 /// The full file name, cut to the column width.
+/// (A path, in search results and the Temp panel, keeps its end: the file name.)
 fn show_name(e: &Entry, w: usize) -> String {
+    if e.name.chars().count() > w && e.name.contains(['/', '\\']) {
+        return fit_left(&e.name, w);
+    }
     fit(&e.name, w)
 }
 
@@ -176,6 +186,8 @@ impl Panel {
             git: Default::default(),
             branch: None,
             found: None,
+            temp: false,
+            filter: None,
         }
     }
 
@@ -210,6 +222,7 @@ impl Panel {
         }
         self.arc = None;
         self.found = None;
+        self.temp = false;
         self.dir = full;
         self.items.clear();
         self.top = 0;
@@ -263,6 +276,9 @@ impl Panel {
                         continue;
                     }
                     let is_dir = md.is_dir();
+                    if !is_dir && self.filter.as_deref().is_some_and(|f| !filter_passes(f, &name)) {
+                        continue;
+                    }
                     list.push(Entry {
                         selected: keep.contains(&name.to_lowercase()),
                         path: de.path(),
@@ -367,6 +383,9 @@ impl Panel {
             }
             let inner = format!("{}{}", av.prefix, first);
             let is_dir = deeper || ae.is_dir;
+            if !is_dir && self.filter.as_deref().is_some_and(|f| !filter_passes(f, first)) {
+                continue;
+            }
             list.push(Entry {
                 name: first.to_string(),
                 path: av.file.join(inner.replace('/', std::path::MAIN_SEPARATOR_STR)),
@@ -421,6 +440,7 @@ impl Panel {
     /// Leave search results, back to the folder.
     pub fn close_results(&mut self) {
         self.found = None;
+        self.temp = false;
         self.load(None);
     }
 
@@ -722,6 +742,11 @@ impl Panel {
         }
 
         let iwu = iw.max(0) as usize;
+        // the filter, on the left of the separator line
+        if let Some(f) = self.filter.as_ref().filter(|_| self.found.is_none()) {
+            let text = format!(" {} ", fit(f, iwu.saturating_sub(14).max(4)));
+            s.text(x + 2, sep_y, &text, th.free_num, bg);
+        }
         // git branch, on the right of the separator line
         if let Some(b) = self.branch.as_ref().filter(|_| self.found.is_none()) {
             // "git:" like a label, the branch like a value (the free space line's colours)

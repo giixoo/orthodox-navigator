@@ -302,7 +302,7 @@ pub fn show(app: &mut App) {
     if entries.is_empty() {
         return;
     }
-    let items: Vec<Item> = entries.iter().map(|e| Item { name: e.name.clone(), path: e.path.clone(), is_dir: e.is_dir, modified: e.modified }).collect();
+    let items: Vec<Item> = entries.iter().map(|e| Item { name: e.path.file_name().map_or_else(|| e.name.clone(), |n| n.to_string_lossy().to_string()), path: e.path.clone(), is_dir: e.is_dir, modified: e.modified }).collect();
     let mut edits = to_edits(&LAST.lock().ok().and_then(|l| l.clone()).unwrap_or_default());
     let mut focus = Focus::Field(0);
     let mut top = 0usize;

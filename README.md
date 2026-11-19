@@ -131,6 +131,11 @@ Ctrl+C inside a command also stops the loop (you are left at the shell prompt).
   escape/unescape, JWT decode and verify (HS256/384/512) and sign (HS256), SHA-256, regex tester with match
   highlighting, GUID, Lorem ipsum and password generators (F6 makes new ones). The text tools start with the
   file under the cursor in Input; or type, paste, load another file (F3); F5 saves the result, F2 copies it.
+- **User menu** (F9): your commands for this folder (`.on-menu`, e.g. build / test / deploy), for this kind of
+  file (Enter runs a file's own command: `*.py` → `python "!.!"`), and global ones; macros for the file name,
+  folder and selected files.
+- **Folder history** (Alt+Backspace), **filter** (Ctrl+F: only `*.rs;*.toml`, or hide `-*.log`), a **Temp
+  panel** to gather files from many folders, file **attributes** and time (Ctrl+A), file colours by mask.
 - **Batch rename** (Alt+F6) of the selected files from a pattern: `[N]` name, `[E]` extension, `[C]` counter,
   `[DATE]` / `[TIME]` of the file, `[Y] [M] [D] [h] [m] [s]`, letters `[N2-5]`, the folder `[P]`; find / replace
   and case. The list shows every new name before anything is renamed; names may swap safely.
@@ -181,9 +186,13 @@ other systems don't tell programs about a modifier pressed on its own). Esc clos
 | F4 / Shift+F4 | edit / edit a new file |
 | F5 / F6 / Shift+F6 | copy (from an archive: extract) / move / rename in place |
 | Alt+F6 | batch rename the selected files by a pattern |
+| F9 | user menu: commands for this folder, for this kind of file, and global ones |
+| Ctrl+A | attributes and the time changed |
+| Ctrl+F | filter: show only files matching masks |
+| Alt+Backspace | folder history |
 | F7 / Alt+F7 | make folder (nested paths work) / find files |
 | F8, Del / Shift+F8, Shift+Del | to Recycle Bin or Trash / delete permanently |
-| Alt+F1 / Alt+F2 | drives and favourites for this / the other panel |
+| Alt+F1 / Alt+F2 | drives and favourites for the left / right panel |
 | Ctrl+D | add the current folder to favourites |
 | Alt+F10 | directory tree |
 | Ctrl+F2 | calculator |

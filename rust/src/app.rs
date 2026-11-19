@@ -42,8 +42,8 @@ pub enum Cmd {
     Sort(SortMode),
     Hidden,
     Reread,
-    DriveActive,
-    DriveOther,
+    DriveLeft,
+    DriveRight,
     Tree,
     View,
     Edit,
@@ -79,6 +79,15 @@ pub enum Cmd {
     CompareFiles,
     GitDiff,
     Find,
+    UserMenu,
+    FolderHistory,
+    TempPanel,
+    AddToTemp,
+    Filter,
+    Attributes,
+    EditColors,
+    EditExtensions,
+    EditGlobalMenu,
 }
 
 /// One thing that happened while a screen was waiting.
@@ -95,6 +104,8 @@ pub enum Input {
 struct PanelInit {
     arc: Option<(PathBuf, String)>,
     focus: Option<String>,
+    /// it was showing the Temp panel
+    temp: bool,
 }
 
 pub struct App {
@@ -134,6 +145,10 @@ pub struct App {
     /// a command was typed on the user screen (Ctrl+O): come back to it after the shell runs it
     resume_user: bool,
     last_find: find::Query,
+    /// folders visited, newest first (Alt+Backspace)
+    dir_hist: Vec<PathBuf>,
+    /// the Temp panel's list
+    temp_list: Vec<PathBuf>,
 }
 
 fn state_file() -> Option<PathBuf> {
@@ -194,7 +209,7 @@ pub fn held_modifiers() -> KeyModifiers {
 
 /// The panels' shortcuts besides the F-keys, most useful first (the key bar shows as many as fit).
 /// Without a modifier it lists Ctrl shortcuts too, so they can be found (and clicked).
-const PANEL_EXTRAS: [Extra; 25] = {
+const PANEL_EXTRAS: [Extra; 28] = {
     const N: KeyModifiers = KeyModifiers::NONE;
     const C: KeyModifiers = KeyModifiers::CONTROL;
     const A: KeyModifiers = KeyModifiers::ALT;
@@ -217,12 +232,15 @@ const PANEL_EXTRAS: [Extra; 25] = {
         Extra { mods: C, key: "U", label: "Swap", code: KeyCode::Char('u') },
         Extra { mods: C, key: "T", label: "Theme", code: KeyCode::Char('t') },
         Extra { mods: C, key: "D", label: "Fav", code: KeyCode::Char('d') },
+        Extra { mods: C, key: "F", label: "Filter", code: KeyCode::Char('f') },
+        Extra { mods: C, key: "A", label: "Attr", code: KeyCode::Char('a') },
         Extra { mods: C, key: "G", label: "Game", code: KeyCode::Char('g') },
         Extra { mods: C, key: "Ins", label: "Copy", code: KeyCode::Insert },
         Extra { mods: C, key: "Enter", label: "Name", code: KeyCode::Enter },
         Extra { mods: C, key: "[", label: "LPath", code: KeyCode::Char('[') },
         Extra { mods: C, key: "]", label: "RPath", code: KeyCode::Char(']') },
         Extra { mods: C, key: "\\", label: "Root", code: KeyCode::Char('\\') },
+        Extra { mods: A, key: "BkSp", label: "Folders", code: KeyCode::Backspace },
         Extra { mods: A, key: "X", label: "Quit", code: KeyCode::Char('x') },
     ]
 };
@@ -355,6 +373,9 @@ impl App {
             if src.get(&format!("p{i}.hidden")).is_some_and(|v| v == "0") {
                 p.show_hidden = false;
             }
+            if host_relaunch {
+                p.filter = src.get(&format!("p{i}.filter")).filter(|f| !f.is_empty()).cloned();
+            }
             let arc = if host_relaunch {
                 src.get(&format!("p{i}.arc"))
                     .map(PathBuf::from)
@@ -364,8 +385,9 @@ impl App {
                 None
             };
             let focus = if host_relaunch { src.get(&format!("p{i}.cursor")).cloned() } else { None };
+            let temp = host_relaunch && src.get(&format!("p{i}.temp")).is_some_and(|v| v == "1");
             panels.push(p);
-            init.push(PanelInit { arc, focus });
+            init.push(PanelInit { arc, focus, temp });
         }
         let fracs = parse_fracs(src.get("fracs"), n);
         let active = if host_relaunch { src.get("active").and_then(|v| v.parse().ok()).unwrap_or(0).min(n - 1) } else { 0 };
@@ -399,6 +421,8 @@ impl App {
             window_frame: false,
             resume_user: host_relaunch && session.get("user").is_some_and(|v| v == "1"),
             last_find: find::Query { mask: "*".into(), text: String::new() },
+            dir_hist: crate::dirhist::load(),
+            temp_list: crate::temp::load(),
         }
     }
 
@@ -563,6 +587,14 @@ impl App {
                     self.panels[i].archive_cd(&prefix, pi.focus.as_deref());
                 }
             }
+            if pi.temp {
+                self.show_temp(i);
+                if let Some(f) = &pi.focus {
+                    if let Some(c) = self.panels[i].items.iter().position(|e| &e.name == f) {
+                        self.panels[i].move_to(c);
+                    }
+                }
+            }
         }
         // after a command in the real shell, follow a `cd` it may have done
         if self.host_relaunch {
@@ -614,6 +646,7 @@ impl App {
         }
         let _ = fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
         let _ = fs::write(f, out);
+        crate::dirhist::save(&self.dir_hist);
     }
 
     /// Everything needed to come back exactly as we were after a command runs in the shell.
@@ -630,6 +663,12 @@ impl App {
             if let Some(av) = &p.arc {
                 out += &format!("p{i}.arc={}\np{i}.prefix={}\n", av.file.display(), av.prefix.trim_end_matches('/'));
             }
+            if let Some(f) = &p.filter {
+                out += &format!("p{i}.filter={f}\n");
+            }
+            if p.temp {
+                out += &format!("p{i}.temp=1\n");
+            }
         }
         let _ = fs::write(f, out);
     }
@@ -641,6 +680,7 @@ impl App {
             return false;
         }
         let d = p.dir.clone();
+        crate::dirhist::visit(&mut self.dir_hist, &d);
         self.last_dir.insert(platform::volume_of(&d), d);
         true
     }
@@ -773,13 +813,16 @@ impl App {
             draw_key_bars(&mut self.screen, &[(KeyModifiers::NONE, labels)]);
             return;
         }
+        // in the Temp panel F8 only takes files off the list
+        let temp = self.panels[self.active].temp;
+        let (f8, sf8) = if temp { ("Remove", "Remove") } else { ("Delete", "Wipe") };
         draw_key_bars_with(
             &mut self.screen,
             &[
-                (KeyModifiers::NONE, ["Help", "Tools", "View", "Edit", "Copy", "RenMov", "MkDir", "Delete", "", "Menu"]),
-                (KeyModifiers::SHIFT, ["", "", "Diff", "New", "", "Rename", "", "Wipe", "", ""]),
+                (KeyModifiers::NONE, ["Help", "Tools", "View", "Edit", "Copy", "RenMov", "MkDir", f8, "User", "Menu"]),
+                (KeyModifiers::SHIFT, ["", "", "Diff", "New", "", "Rename", "", sf8, "", ""]),
                 (KeyModifiers::CONTROL, ["", "Calc", "Name", "Ext", "Time", "Size", "", "", "", ""]),
-                (KeyModifiers::ALT, ["Drives", "Other", "GitDif", "", "SysMon", "Batch", "Find", "", "", "Tree"]),
+                (KeyModifiers::ALT, ["Left", "Right", "GitDif", "", "SysMon", "Batch", "Find", "", "", "Tree"]),
             ],
             &PANEL_EXTRAS,
         );
@@ -929,13 +972,14 @@ impl App {
 
         if alt && !ctrl {
             match k.code {
-                KeyCode::F(1) => return self.run_cmd(Cmd::DriveActive),
-                KeyCode::F(2) => return self.run_cmd(Cmd::DriveOther),
+                KeyCode::F(1) => return self.run_cmd(Cmd::DriveLeft),
+                KeyCode::F(2) => return self.run_cmd(Cmd::DriveRight),
                 KeyCode::F(10) => return self.run_cmd(Cmd::Tree),
                 KeyCode::F(3) => return self.run_cmd(Cmd::GitDiff),
                 KeyCode::F(7) => return self.run_cmd(Cmd::Find),
                 KeyCode::F(5) => return self.run_cmd(Cmd::SysMon),
                 KeyCode::F(6) => return self.run_cmd(Cmd::BatchRename),
+                KeyCode::Backspace => return self.run_cmd(Cmd::FolderHistory),
                 KeyCode::Char('x') | KeyCode::Char('X') => return self.cmd_quit(),
                 KeyCode::Char(c) => {
                     self.quick = Some(String::new());
@@ -971,6 +1015,8 @@ impl App {
                     return;
                 }
                 KeyCode::Char('d') => return self.run_cmd(Cmd::AddFavorite),
+                KeyCode::Char('f') => return self.run_cmd(Cmd::Filter),
+                KeyCode::Char('a') => return self.run_cmd(Cmd::Attributes),
                 KeyCode::Char('l') => return self.run_cmd(Cmd::Preview),
                 KeyCode::Up | KeyCode::Down if self.preview.is_some() => {
                     if let Some(p) = self.preview.as_mut() {
@@ -1127,6 +1173,10 @@ impl App {
                 self.run_cmd(Cmd::Tools);
                 true
             }
+            KeyCode::F(9) => {
+                self.run_cmd(Cmd::UserMenu);
+                true
+            }
             KeyCode::F(10) => {
                 if let Some(c) = menu::run(self, 0) {
                     self.run_cmd(c);
@@ -1154,11 +1204,11 @@ impl App {
                 true
             }
             KeyCode::F(8) => {
-                fileops::delete(self, shift);
+                self.delete(shift);
                 true
             }
             KeyCode::Delete if cmd_empty => {
-                fileops::delete(self, shift);
+                self.delete(shift);
                 true
             }
             _ => false,
@@ -1183,8 +1233,9 @@ impl App {
                     p.forget();
                 }
             }
-            Cmd::DriveActive => self.change_drive(self.active),
-            Cmd::DriveOther => self.change_drive(self.passive_idx()),
+            // Alt+F1 the left panel, Alt+F2 the right one (the rightmost when there are more)
+            Cmd::DriveLeft => self.change_drive(0),
+            Cmd::DriveRight => self.change_drive(self.panels.len() - 1),
             Cmd::Tree => self.cmd_tree(),
             Cmd::View => self.cmd_view(),
             Cmd::Edit => self.cmd_edit(),
@@ -1198,8 +1249,8 @@ impl App {
             Cmd::Rename => self.cmd_rename(),
             Cmd::BatchRename => crate::rename::show(self),
             Cmd::Mkdir => self.cmd_mkdir(),
-            Cmd::Delete => fileops::delete(self, false),
-            Cmd::Wipe => fileops::delete(self, true),
+            Cmd::Delete => self.delete(false),
+            Cmd::Wipe => self.delete(true),
             Cmd::SelectGroup => self.select_group(true),
             Cmd::UnselectGroup => self.select_group(false),
             Cmd::Invert => self.invert_selection(),
@@ -1239,6 +1290,54 @@ impl App {
                 }
                 self.last_find = q;
             }
+            Cmd::UserMenu => crate::usermenu::show(self),
+            Cmd::FolderHistory => {
+                let current = self.panels[self.active].dir.clone();
+                let mut list = std::mem::take(&mut self.dir_hist);
+                let pick = crate::dirhist::pick(self, &mut list, &current);
+                self.dir_hist = list;
+                if let Some(d) = pick {
+                    let i = self.active;
+                    if !self.go(i, &d, None) {
+                        dialogs::message(self, "Folder history", &format!("{} is not there any more.", d.display()), true);
+                        self.dir_hist.retain(|p| !same_path(p, &d));
+                    }
+                }
+            }
+            Cmd::TempPanel => {
+                let a = self.active;
+                if self.panels[a].temp {
+                    self.panels[a].close_results();
+                } else {
+                    self.show_temp(a);
+                }
+            }
+            Cmd::AddToTemp => self.add_to_temp(),
+            Cmd::Filter => {
+                let p = &self.panels[self.active];
+                if p.found.is_some() {
+                    return dialogs::message(self, "Filter", "The filter works on folders and archives,\nnot on search results or the Temp panel.", false);
+                }
+                let (dir, cur) = (p.dir.clone(), p.filter.clone());
+                if let Some(f) = crate::filter::ask(self, &dir, cur.as_deref()) {
+                    let p = self.active();
+                    p.filter = f;
+                    p.load(None);
+                }
+            }
+            Cmd::Attributes => crate::attrs::show(self),
+            Cmd::EditColors => {
+                if let Some(f) = crate::colors::file() {
+                    if !f.exists() {
+                        let _ = fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
+                        let _ = fs::write(&f, crate::colors::DEFAULT);
+                    }
+                    editor::edit(self, &f);
+                    crate::colors::reload();
+                }
+            }
+            Cmd::EditExtensions => crate::usermenu::edit_extensions(self),
+            Cmd::EditGlobalMenu => crate::usermenu::edit_global(self),
             Cmd::Tools => {
                 let file = self.panels[self.active].current().filter(|e| !e.is_dir && !e.is_up).map(|e| e.path.clone());
                 let dir = self.panels[self.active].dir.clone();
@@ -1318,6 +1417,10 @@ impl App {
             }
             return;
         }
+        // a command for this kind of file (F9 shows them; the one named Enter runs here)
+        if let Some(line) = crate::usermenu::enter_command(self, &e) {
+            return self.run_shell(&line);
+        }
         if e.exec || (cfg!(windows) && panel::is_exec_name(&e.name)) {
             let line = platform::run_file(&self.shell, &e.name);
             self.run_shell(&line);
@@ -1364,10 +1467,19 @@ impl App {
     }
 
     pub fn change_drive(&mut self, panel: usize) {
-        let title = if panel == self.active { "Drives and favourites" } else { "Drives and favourites (other panel)" };
+        let title = match panel {
+            _ if self.panels.len() < 2 => "Drives and favourites",
+            0 => "Drives and favourites: left panel",
+            _ => "Drives and favourites: right panel",
+        };
         let current = self.panels[panel].dir.clone();
         let Some(pick) = favorites::pick(self, title, &current) else { return };
+        if matches!(pick, favorites::Pick::Temp) {
+            self.show_temp(panel);
+            return self.set_active(panel);
+        }
         let (target, shown) = match pick {
+            favorites::Pick::Temp => return,
             favorites::Pick::Volume(root) if root != platform::home() => {
                 let t = self.last_dir.get(&platform::volume_of(&root)).filter(|p| p.is_dir()).cloned().unwrap_or(root.clone());
                 (t, root)
@@ -1532,7 +1644,12 @@ impl App {
 
     fn select_group(&mut self, select: bool) {
         let title = if select { "Select" } else { "Unselect" };
-        let Some(mask) = dialogs::input(self, title, "Files matching:", "*.*") else { return };
+        // the extension of the file under the cursor, so Gray+ Enter selects all files like it
+        let def = match self.active().current().filter(|e| !e.is_dir).map(|e| e.ext()) {
+            Some(ext) if !ext.is_empty() => format!("*{ext}"),
+            _ => "*.*".to_string(),
+        };
+        let Some(mask) = dialogs::input(self, title, "Files matching:", &def) else { return };
         let patterns: Vec<String> = mask
             .split([';', ',', ' '])
             .filter(|m| !m.is_empty())
@@ -1684,6 +1801,81 @@ impl App {
             path.push(std::path::MAIN_SEPARATOR);
         }
         self.cmd.insert(&path);
+    }
+
+    /// The shell commands run in (for quoting).
+    pub fn shell_name(&self) -> String {
+        self.shell.clone()
+    }
+
+    /// Run a command line in the shell, as if typed (without adding it to the history).
+    pub fn run_line(&mut self, line: &str) {
+        self.run_shell(line);
+    }
+
+    /// Re-read both panels (after something changed files).
+    pub fn reload_panels(&mut self) {
+        for p in self.panels.iter_mut() {
+            p.load(None);
+        }
+    }
+
+    /// Show the Temp panel in panel i (keeping the cursor where it was if it already shows it).
+    fn show_temp(&mut self, i: usize) {
+        let was = self.panels[i].temp.then_some(self.panels[i].cursor);
+        let entries = crate::temp::entries(&self.temp_list);
+        let p = &mut self.panels[i];
+        p.set_results(crate::temp::title(entries.len()), entries);
+        p.temp = true;
+        if let Some(c) = was {
+            p.move_to(c);
+        }
+    }
+
+    fn refresh_temp(&mut self) {
+        crate::temp::save(&self.temp_list);
+        for i in 0..self.panels.len() {
+            if self.panels[i].temp {
+                self.show_temp(i);
+            }
+        }
+    }
+
+    /// Put the selected files (or the one under the cursor) on the Temp panel's list.
+    pub fn add_to_temp(&mut self) {
+        let p = &self.panels[self.active];
+        if p.arc.is_some() || p.temp {
+            return;
+        }
+        let paths: Vec<PathBuf> = p.targets().into_iter().filter(|e| !e.is_up).map(|e| e.path).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let n = crate::temp::add(&mut self.temp_list, &paths);
+        for e in self.active().items.iter_mut() {
+            e.selected = false;
+        }
+        self.refresh_temp();
+        // with the Temp panel on screen the change shows there; otherwise say where the files went
+        if !self.panels.iter().any(|p| p.temp) {
+            let text = format!("{n} added; the Temp panel has {}.\nOpen it from Alt+F1 / Alt+F2 or the Disk menu.", self.temp_list.len());
+            dialogs::message(self, "Temp panel", &text, false);
+        }
+    }
+
+    /// F8: delete, or in the Temp panel take the files off the list.
+    fn delete(&mut self, permanent: bool) {
+        if self.panels[self.active].temp {
+            let paths: Vec<PathBuf> = self.panels[self.active].targets().into_iter().map(|e| e.path).collect();
+            crate::temp::remove(&mut self.temp_list, &paths);
+            return self.refresh_temp();
+        }
+        fileops::delete(self, permanent);
+    }
+
+    /// The other panel shows the Temp panel (F5 there adds files to it instead of copying).
+    pub fn passive_is_temp(&self) -> bool {
+        self.panels[self.passive_idx()].temp && self.passive_idx() != self.active
     }
 
     fn cmd_quit(&mut self) {

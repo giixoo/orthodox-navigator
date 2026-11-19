@@ -1,6 +1,6 @@
 # Drives and favourites
 
-**Alt+F1** (this panel) or **Alt+F2** (the other panel). Drives and your favourite folders, each with a
+**Alt+F1** (left panel) or **Alt+F2** (right panel). Drives and your favourite folders, each with a
 name you choose: work, docs, downloads...
 
 | Key | What it does |

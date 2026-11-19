@@ -4,6 +4,32 @@ All notable changes to Orthodox Navigator. The format follows [Keep a Changelog]
 and versions follow [Semantic Versioning](https://semver.org/). To release, add a section for the new version
 and push a tag `vX.Y.Z` (see "Release downloads" in the README); the section becomes the release notes.
 
+## [Unreleased]
+
+### Added
+
+- **User menu** (F9): the folder's own menu (`.on-menu` here or above), a global menu, and commands for the
+  file under the cursor by its name (Options → Commands for file types); the one named Enter runs on Enter.
+  Macros `!.!`, `!`, `!\`, `!&`, `!@`.
+- **Folder history** (Alt+Backspace): folders visited, newest first, kept between sessions; type to filter.
+- **Filter** (Ctrl+F): show only files matching masks, or hide some (`-*.log`); pick from the extensions in
+  the folder.
+- **Temp panel** (Alt+F1 / Alt+F2 → Temp panel): files gathered from many folders; F5 to it adds files, F8 in it
+  takes them off the list.
+- **Attributes** (Ctrl+A): read-only, hidden, system, archive on Windows; read / write / run for owner,
+  group and others elsewhere; the time a file was changed. Works on several files at once.
+- File colours by mask, editable (Options → File colours).
+- Gray + starts with the extension of the file under the cursor.
+
+### Changed
+
+- Alt+F1 opens the drives for the left panel and Alt+F2 for the right one, as in DN (they were this /
+  the other panel).
+
+### Fixed
+
+- Batch rename in search results used the relative path as the name.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added
