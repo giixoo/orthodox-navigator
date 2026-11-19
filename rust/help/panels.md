@@ -29,11 +29,12 @@ one to press it. Hold Shift, Ctrl or Alt (Windows) to see what the keys do with 
 | **F5** | copy to the other panel (in an archive: extract) |
 | **F6** | move to the other panel |
 | **Shift+F6** | rename in place |
+| **Alt+F6** | [batch rename](rename.md): new names from a pattern (date, time, counter, ...) |
 | **F7** | make a folder |
 | **F8, Del** | delete to the Trash |
 | **Shift+F8** | delete permanently |
 
-F5, F6 and F8 work on the selected files, or on the one under the cursor when nothing is selected.
+F5, F6, Alt+F6 and F8 work on the selected files, or on the one under the cursor when nothing is selected.
 
 ## Selecting
 

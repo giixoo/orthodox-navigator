@@ -1,7 +1,8 @@
 # Developer tools
 
 **F2** in the panels. Pick a tool on the left; type or paste into Input, and the Output follows as you
-type. Tools with settings show them above Input as boxes and check boxes. Each tool keeps its own settings,
+type. The text tools (all but JWT and the generators) start with the file under the panel cursor in Input,
+up to 4 MB; its name is in the Input title. Once you type, paste or load something else, Input stays yours. Tools with settings show them above Input as boxes and check boxes. Each tool keeps its own settings,
 and they are remembered between runs (except JWT secrets, which are kept only until ON closes).
 
 - Base64 encode / decode, URL encode / decode

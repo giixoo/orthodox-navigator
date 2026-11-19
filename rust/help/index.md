@@ -14,6 +14,7 @@ the command line with `on`, do the job, leave.
 - [Drives and favourites](favorites.md) - Alt+F1 / Alt+F2
 - [Find files](find.md) - Alt+F7
 - [Compare files and git](diff.md) - Shift+F3, Alt+F3
+- [Batch rename](rename.md) - Alt+F6
 - [Developer tools](tools.md) - F2
 - [System monitor](sysmon.md) - Alt+F5
 - [Calculator](calc.md) - Ctrl+F2

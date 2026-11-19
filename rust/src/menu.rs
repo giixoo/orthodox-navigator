@@ -49,6 +49,7 @@ fn build(i: usize) -> Vec<Option<Item>> {
             item("Copy", "F5", Cmd::Copy),
             item("Rename/Move", "F6", Cmd::Move),
             item("Rename in place", "Shift+F6", Cmd::Rename),
+            item("Batch rename", "Alt+F6", Cmd::BatchRename),
             item("Make folder", "F7", Cmd::Mkdir),
             item("Delete to Trash", "F8", Cmd::Delete),
             item("Wipe (delete permanently)", "Shift+F8", Cmd::Wipe),

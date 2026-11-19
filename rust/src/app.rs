@@ -52,6 +52,7 @@ pub enum Cmd {
     Copy,
     Move,
     Rename,
+    BatchRename,
     Mkdir,
     Delete,
     Wipe,
@@ -778,7 +779,7 @@ impl App {
                 (KeyModifiers::NONE, ["Help", "Tools", "View", "Edit", "Copy", "RenMov", "MkDir", "Delete", "", "Menu"]),
                 (KeyModifiers::SHIFT, ["", "", "Diff", "New", "", "Rename", "", "Wipe", "", ""]),
                 (KeyModifiers::CONTROL, ["", "Calc", "Name", "Ext", "Time", "Size", "", "", "", ""]),
-                (KeyModifiers::ALT, ["Drives", "Other", "GitDif", "", "SysMon", "", "Find", "", "", "Tree"]),
+                (KeyModifiers::ALT, ["Drives", "Other", "GitDif", "", "SysMon", "Batch", "Find", "", "", "Tree"]),
             ],
             &PANEL_EXTRAS,
         );
@@ -934,6 +935,7 @@ impl App {
                 KeyCode::F(3) => return self.run_cmd(Cmd::GitDiff),
                 KeyCode::F(7) => return self.run_cmd(Cmd::Find),
                 KeyCode::F(5) => return self.run_cmd(Cmd::SysMon),
+                KeyCode::F(6) => return self.run_cmd(Cmd::BatchRename),
                 KeyCode::Char('x') | KeyCode::Char('X') => return self.cmd_quit(),
                 KeyCode::Char(c) => {
                     self.quick = Some(String::new());
@@ -1194,6 +1196,7 @@ impl App {
             Cmd::Copy => fileops::copy_or_move(self, false),
             Cmd::Move => fileops::copy_or_move(self, true),
             Cmd::Rename => self.cmd_rename(),
+            Cmd::BatchRename => crate::rename::show(self),
             Cmd::Mkdir => self.cmd_mkdir(),
             Cmd::Delete => fileops::delete(self, false),
             Cmd::Wipe => fileops::delete(self, true),

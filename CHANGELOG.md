@@ -4,13 +4,18 @@ All notable changes to Orthodox Navigator. The format follows [Keep a Changelog]
 and versions follow [Semantic Versioning](https://semver.org/). To release, add a section for the new version
 and push a tag `vX.Y.Z` (see "Release downloads" in the README); the section becomes the release notes.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-19
 
 ### Added
 
 - One-command install, update and removal from the latest release, without security warnings:
   `install.ps1` (Windows) and `install.sh` (Linux, macOS). See "Install with one command" in the README.
 - README: how to build on macOS.
+- **Batch rename** (Alt+F6): new names for the selected files from a pattern: name, extension, letters of the
+  name, counter, the file's date and time, folder name; find / replace and case. A live list shows every new
+  name and what is wrong with it (duplicates, existing files, bad characters) before anything is renamed;
+  names may swap or shift safely.
+- Developer tools: the text tools start with the file under the cursor in Input (up to 4 MB).
 
 ## [0.4.0] - 2026-11-18
 

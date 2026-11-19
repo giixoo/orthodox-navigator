@@ -75,6 +75,27 @@ fn uses_input(t: Tool) -> bool {
     !matches!(t, Tool::Guid | Tool::Lorem | Tool::Password)
 }
 
+/// Does the tool work on whole texts (rather than a token you type)? These start with the file under the
+/// panel cursor in Input.
+fn takes_file(t: Tool) -> bool {
+    uses_input(t) && !matches!(t, Tool::JwtDecode | Tool::JwtSign)
+}
+
+/// Files up to this size are put into Input on their own; F3 loads bigger ones.
+const AUTO_LOAD_MAX: u64 = 4 << 20;
+
+/// A file for Input: its text, or for a binary file a note plus the bytes.
+fn read_for_input(p: &Path) -> Result<(String, Option<Vec<u8>>), String> {
+    let b = std::fs::read(p).map_err(|e| e.to_string())?;
+    if b.len() > 16 << 20 {
+        return Err("The file is over 16 MB.".into());
+    }
+    Ok(match String::from_utf8(b) {
+        Ok(s) => (s, None),
+        Err(e) => (format!("(binary file {}, {} bytes)", p.display(), n0(e.as_bytes().len() as u64)), Some(e.into_bytes())),
+    })
+}
+
 const TOOLS: [(Tool, &str, &[Field]); 15] = [
     (Tool::B64Enc, "Base64 encode", NONE),
     (Tool::B64Dec, "Base64 decode", NONE),
@@ -866,7 +887,8 @@ fn toggle(ed: &mut LineEdit) {
     ed.set(v);
 }
 
-/// Open the tools; `file` is the file under the panel cursor (offered by F3).
+/// Open the tools; `file` is the file under the panel cursor. The text tools start with it in Input (until
+/// you type or load something else), and F3 offers it.
 pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
     let mut sel = 0usize;
     let mut focus = Focus::List;
@@ -879,8 +901,34 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
     let mut marks = Vec::new();
     let mut out = run(TOOLS[sel].0, &values(&edits[sel]), "", None, &mut marks);
     let mut dirty = false;
+    // Input holds the file under the cursor, put there on its own; `manual` once you change Input yourself
+    let mut auto: Option<String> = None;
+    let mut manual = false;
 
     loop {
+        // the text tools get the file under the cursor; the others don't keep it
+        if !manual {
+            if let Some(f) = file.as_ref() {
+                let want = takes_file(TOOLS[sel].0);
+                if want && auto.is_none() {
+                    let small = std::fs::metadata(f).is_ok_and(|m| m.len() <= AUTO_LOAD_MAX);
+                    match read_for_input(f).ok().filter(|_| small) {
+                        Some((t, b)) => {
+                            area.set(&t);
+                            bytes = b;
+                            auto = Some(f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                            dirty = true;
+                        }
+                        None => manual = true, // too big or unreadable: leave Input to you (F3)
+                    }
+                } else if !want && auto.is_some() {
+                    area.set("");
+                    bytes = None;
+                    auto = None;
+                    dirty = true;
+                }
+            }
+        }
         let now: Vec<Vec<String>> = edits.iter().map(|e| values(e)).collect();
         if now != saved {
             save_settings(&now);
@@ -900,6 +948,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
         let (cur_sel, cur_focus, cur_top) = (sel, focus, out_top);
         let (area_ref, edits_ref, marks_ref, lines_ref) = (&mut area, &mut edits[sel], &marks, &lines);
         let binary = bytes.is_some();
+        let auto_ref = &auto;
         let inp = app.window_input(
             &mut |s| {
                 let t = theme::current();
@@ -944,8 +993,14 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                 // input
                 if lay.in_h > 0 {
                     s.boxed(rx, lay.in_y, rw, lay.in_h, t.frame, t.panel_bg, cur_focus == Focus::Input);
-                    let ititle = if binary { " Input (binary file loaded) " } else { " Input " };
-                    s.text(rx + 2, lay.in_y, ititle, t.header, t.panel_bg);
+                    let ititle = match (auto_ref, binary) {
+                        (Some(n), true) => format!(" Input: {n} (binary) "),
+                        (Some(n), false) => format!(" Input: {n} "),
+                        (None, true) => " Input (binary file loaded) ".into(),
+                        (None, false) => " Input ".into(),
+                    };
+                    let ititle = fit(&ititle, (rw - 4).max(0) as usize);
+                    s.text(rx + 2, lay.in_y, &ititle, t.header, t.panel_bg);
                     area_ref.draw(s, rx + 1, lay.in_y + 1, rw - 2, lay.in_h - 2, cur_focus == Focus::Input, marks_ref);
                 }
                 // output
@@ -981,6 +1036,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                         focus = Focus::Input;
                         area.insert(&t);
                         bytes = None;
+                        (manual, auto) = (true, None);
                     }
                 }
                 dirty = true;
@@ -1040,26 +1096,19 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                     let init = file.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
                     if let Some(name) = dialogs::input(app, "Load into Input", "File:", &init) {
                         let p = dir.join(name.trim());
-                        match std::fs::read(&p) {
-                            Ok(b) if b.len() > 16 << 20 => dialogs::message(app, "Load", "The file is over 16 MB.", true),
-                            Ok(b) => {
-                                match String::from_utf8(b) {
-                                    Ok(s) => {
-                                        area.set(&s);
-                                        bytes = None;
-                                    }
-                                    Err(e) => {
-                                        area.set(&format!("(binary file {}, {} bytes)", p.display(), n0(e.as_bytes().len() as u64)));
-                                        bytes = Some(e.into_bytes());
-                                    }
-                                }
+                        match read_for_input(&p) {
+                            Ok((t, b)) => {
+                                area.set(&t);
+                                bytes = b;
+                                (manual, auto) = (true, None);
                                 dirty = true;
                             }
-                            Err(e) => dialogs::message(app, "Load", &e.to_string(), true),
+                            Err(e) => dialogs::message(app, "Load", &e, true),
                         }
                     }
                 }
                 KeyCode::F(4) if input_on => {
+                    (manual, auto) = (true, None);
                     match &out {
                         Ok(Out::Text(t)) => {
                             area.set(t);
@@ -1147,6 +1196,7 @@ pub fn show(app: &mut App, file: Option<PathBuf>, dir: &Path) {
                         if area.key(&k, page) {
                             bytes = None;
                             dirty = true;
+                            (manual, auto) = (true, None);
                         }
                     }
                     Focus::Output => match k.code {
