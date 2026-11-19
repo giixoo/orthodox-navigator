@@ -20,6 +20,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("find", include_str!("../help/find.md")),
     ("diff", include_str!("../help/diff.md")),
     ("tools", include_str!("../help/tools.md")),
+    ("rename", include_str!("../help/rename.md")),
     ("sysmon", include_str!("../help/sysmon.md")),
     ("calc", include_str!("../help/calc.md")),
     ("themes", include_str!("../help/themes.md")),

@@ -19,6 +19,7 @@ mod menu;
 mod panel;
 mod platform;
 mod preview;
+mod rename;
 mod screen;
 mod syntax;
 mod sysmon;

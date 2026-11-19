@@ -27,8 +27,8 @@ Then open a new terminal and type `on`.
       & ([scriptblock]::Create((irm https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.ps1))) -Uninstall
       curl -fsSL https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.sh | sh -s -- --uninstall
 
-- **A specific version:** set `ON_VERSION` first: `$env:ON_VERSION='0.4.0'` in PowerShell, or
-  `... | ON_VERSION=0.4.0 sh`.
+- **A specific version:** set `ON_VERSION` first: `$env:ON_VERSION='0.5.0'` in PowerShell, or
+  `... | ON_VERSION=0.5.0 sh`.
 
 You can read the scripts before running them: [install.ps1](install.ps1), [install.sh](install.sh).
 
@@ -81,8 +81,8 @@ page has, for each version:
 A browser marks downloaded files, so Windows (SmartScreen) and macOS (Gatekeeper) warn about the unsigned
 program. Files downloaded from the terminal are not marked, so nothing warns:
 
-    Invoke-WebRequest https://github.com/giixoo/orthodox-navigator/releases/download/v0.4.0/on-0.4.0-windows-x64.exe -OutFile on.exe
-    curl -fLo on https://github.com/giixoo/orthodox-navigator/releases/download/v0.4.0/on-0.4.0-linux-x64 && chmod +x on
+    Invoke-WebRequest https://github.com/giixoo/orthodox-navigator/releases/download/v0.5.0/on-0.5.0-windows-x64.exe -OutFile on.exe
+    curl -fLo on https://github.com/giixoo/orthodox-navigator/releases/download/v0.5.0/on-0.5.0-linux-x64 && chmod +x on
 
 To clear the mark from a browser download, run `Unblock-File <file>` on Windows (unblock a zip before
 unpacking it) or `xattr -d com.apple.quarantine <file>` on macOS. On Linux nothing is marked, but a browser
@@ -129,7 +129,11 @@ Ctrl+C inside a command also stops the loop (you are left at the shell prompt).
   F4 hex, F5 format, F6 syntax, F8 code page); Tab or Esc goes back to the files.
 - **Developer tools** (F2): Base64 encode/decode, URL encode/decode, string escape/unescape (JSON), HTML/XML
   escape/unescape, JWT decode and verify (HS256/384/512) and sign (HS256), SHA-256, regex tester with match
-  highlighting, GUID, Lorem ipsum and password generators (F6 makes new ones). Works on typed or pasted text or on a file (F3 load, F5 save the result, F2 copy it).
+  highlighting, GUID, Lorem ipsum and password generators (F6 makes new ones). The text tools start with the
+  file under the cursor in Input; or type, paste, load another file (F3); F5 saves the result, F2 copies it.
+- **Batch rename** (Alt+F6) of the selected files from a pattern: `[N]` name, `[E]` extension, `[C]` counter,
+  `[DATE]` / `[TIME]` of the file, `[Y] [M] [D] [h] [m] [s]`, letters `[N2-5]`, the folder `[P]`; find / replace
+  and case. The list shows every new name before anything is renamed; names may swap safely.
 - **Compare** two files side by side (Shift+F3, with the file of the same name in the other panel, or the one
   under its cursor); **git diff** of a file against HEAD (Alt+F3). Panels show the current git branch (`git: main`)
   and mark changes: M modified,
@@ -176,6 +180,7 @@ other systems don't tell programs about a modifier pressed on its own). Esc clos
 | F3 / Shift+F3 / Alt+F3 | view (on a folder: its size) / compare with the other panel / git diff with HEAD |
 | F4 / Shift+F4 | edit / edit a new file |
 | F5 / F6 / Shift+F6 | copy (from an archive: extract) / move / rename in place |
+| Alt+F6 | batch rename the selected files by a pattern |
 | F7 / Alt+F7 | make folder (nested paths work) / find files |
 | F8, Del / Shift+F8, Shift+Del | to Recycle Bin or Trash / delete permanently |
 | Alt+F1 / Alt+F2 | drives and favourites for this / the other panel |
