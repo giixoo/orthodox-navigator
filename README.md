@@ -2,6 +2,38 @@
 
 A two-panel console file manager in the spirit of DOS Navigator, for Windows, Linux and macOS.
 
+## Install with one command
+
+**Windows** (PowerShell):
+
+    irm https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.ps1 | iex
+
+**Linux / macOS** (terminal):
+
+    curl -fsSL https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.sh | sh
+
+Then open a new terminal and type `on`.
+
+- **What it does:** downloads the latest release for your system and installs it for you only (no admin,
+  no sudo). It adds the line that loads the `on` command to your shell's startup file: the PowerShell
+  profiles on Windows, `~/.zshrc` or `~/.bashrc` elsewhere.
+- **Where it goes:** `%LOCALAPPDATA%\Programs\Orthodox Navigator` on Windows,
+  `~/.local/share/orthodox-navigator` elsewhere.
+- **No security warnings:** files downloaded from the terminal don't get the "downloaded from the
+  internet" mark, so SmartScreen and Gatekeeper don't stop the unsigned program.
+- **Update:** run the same command again.
+- **Remove:**
+
+      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.ps1))) -Uninstall
+      curl -fsSL https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.sh | sh -s -- --uninstall
+
+- **A specific version:** set `ON_VERSION` first: `$env:ON_VERSION='0.4.0'` in PowerShell, or
+  `... | ON_VERSION=0.4.0 sh`.
+
+You can read the scripts before running them: [install.ps1](install.ps1), [install.sh](install.sh).
+
+## Build from source
+
 Written in Rust (`rust/`). Build it and copy the program to `bin/`, which is where the shell functions
 start it from (so you can rebuild while it is running):
 
@@ -31,9 +63,10 @@ needs no `xattr` or Gatekeeper approval.
 Works best in Windows Terminal or any terminal with 24-bit colour. Colours are sent as exact VGA values;
 set `ON_COLORS=16` to use the terminal's own 16-colour palette instead.
 
-## Install a release
+## Release downloads
 
-The [Releases](https://github.com/giixoo/orthodox-navigator/releases) page has, for each version:
+Besides the one-command install, the [Releases](https://github.com/giixoo/orthodox-navigator/releases)
+page has, for each version:
 
 - **Windows x64**: `-setup.exe` (installer: per user, no admin needed; adds the program to PATH and the
   `on` command to your PowerShell profiles), `.zip` (program and shell function, unpack anywhere), or just
@@ -44,6 +77,16 @@ The [Releases](https://github.com/giixoo/orthodox-navigator/releases) page has, 
 - **macOS** (Apple silicon and Intel in one binary): `.tar.gz` (program and shell function) or just the
   program. It isn't signed, so after downloading run `xattr -d com.apple.quarantine <file>` (or allow it in
   System Settings → Privacy & Security). Unpack, then add `source <folder>/shell/on.sh` to `~/.zshrc`.
+
+A browser marks downloaded files, so Windows (SmartScreen) and macOS (Gatekeeper) warn about the unsigned
+program. Files downloaded from the terminal are not marked, so nothing warns:
+
+    Invoke-WebRequest https://github.com/giixoo/orthodox-navigator/releases/download/v0.4.0/on-0.4.0-windows-x64.exe -OutFile on.exe
+    curl -fLo on https://github.com/giixoo/orthodox-navigator/releases/download/v0.4.0/on-0.4.0-linux-x64 && chmod +x on
+
+To clear the mark from a browser download, run `Unblock-File <file>` on Windows (unblock a zip before
+unpacking it) or `xattr -d com.apple.quarantine <file>` on macOS. On Linux nothing is marked, but a browser
+download loses the executable permission: `chmod +x <file>`.
 
 To make a release, add the version's section to [CHANGELOG.md](CHANGELOG.md) (it becomes the release
 notes) and push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The workflow in

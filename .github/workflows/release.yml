@@ -222,6 +222,17 @@ jobs:
             /^## / { if (on) exit; on = ($2 == v || $2 == "[" v "]") ; next }
             on' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          raw=https://raw.githubusercontent.com/${{ github.repository }}/main
+          cat >> notes.md <<EOF
+
+          ### Install
+
+          Windows (PowerShell): \`irm $raw/install.ps1 | iex\`
+
+          Linux / macOS: \`curl -fsSL $raw/install.sh | sh\`
+
+          Then open a new terminal and type \`on\`. Run the same command again to update.
+          EOF
           cat notes.md
 
       - uses: softprops/action-gh-release@v2
