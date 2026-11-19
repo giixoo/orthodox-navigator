@@ -4,7 +4,6 @@
 #
 # Windows x64: on-<ver>-windows-x64.exe (just the program), .zip (program + shell function), -setup.exe (installer)
 # Linux x64 / arm64: on-<ver>-linux-<arch> (static, runs on any distribution), .tar.gz, .deb, .rpm
-# macOS: on-<ver>-macos-universal (one binary for Apple silicon and Intel), .tar.gz
 
 name: Release
 
@@ -145,62 +144,9 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: dist/*
 
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Version
-        id: ver
-        run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            v=${GITHUB_REF_NAME#v}
-            # macOS sed has no "0,/re/" address: awk replaces only the first version line (the package's)
-            awk -v v="$v" '!done && /^version = / { print "version = \"" v "\""; done = 1; next } 1' rust/Cargo.toml > Cargo.toml.new
-            mv Cargo.toml.new rust/Cargo.toml
-          else
-            v=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
-          fi
-          echo "v=$v" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
-      - name: Test
-        working-directory: rust
-        run: cargo test --release
-
-      - name: Build (Apple silicon and Intel)
-        working-directory: rust
-        run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
-
-      - name: Universal binary and tar.gz
-        run: |
-          v=${{ steps.ver.outputs.v }}
-          name=on-$v-macos-universal
-          mkdir -p dist "stage/$name/bin" "stage/$name/shell"
-          lipo -create -output "dist/$name" \
-            rust/target/aarch64-apple-darwin/release/on rust/target/x86_64-apple-darwin/release/on
-          lipo -info "dist/$name"
-          cp "dist/$name" "stage/$name/bin/on"
-          cp shell/on.sh "stage/$name/shell/"
-          cp README.md LICENSE "stage/$name/"
-          tar -C stage -czf "dist/$name.tar.gz" "$name"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: dist/*
-
   release:
     if: github.ref_type == 'tag'
-    needs: [windows, linux, macos]
+    needs: [windows, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

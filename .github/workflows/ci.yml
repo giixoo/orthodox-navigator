@@ -1,4 +1,4 @@
-# Build, test and lint pushes to main and pull requests (Windows, Linux and macOS).
+# Build, test and lint pushes to main and pull requests (Windows and Linux).
 
 name: CI
 
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:

@@ -6,6 +6,10 @@ and push a tag `vX.Y.Z` (see "Install a release" in the README); the section bec
 
 ## [Unreleased]
 
+### Removed
+
+- The macOS release build and macOS CI (released once, in 0.4.0). ON still builds from source on macOS.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added
