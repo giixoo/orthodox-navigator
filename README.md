@@ -12,7 +12,7 @@ start it from (so you can rebuild while it is running):
 
 ### Build on macOS
 
-There is no macOS release download, so build it yourself (Apple silicon or Intel):
+Instead of downloading the release (Apple silicon or Intel):
 
 1. Install the command line tools (compiler and linker): `xcode-select --install`
 2. Install Rust: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then open a new terminal
