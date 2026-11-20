@@ -1,8 +1,6 @@
 //! Remote panels: folders on other machines over SFTP (the system `sftp`) and FTP / FTPS (the system
 //! `curl`). See docs/superpowers/specs/2026-11-19-remote-panels-design.md.
 
-// File operations on remote panels come in plan Task 9; remove this then.
-#![allow(dead_code)]
 
 pub mod askpass;
 pub mod ftp;

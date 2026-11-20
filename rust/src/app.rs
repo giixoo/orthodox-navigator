@@ -465,6 +465,14 @@ impl App {
         &mut self.panels[self.active]
     }
 
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub fn passive_index(&self) -> usize {
+        self.passive_idx()
+    }
+
     fn passive_idx(&self) -> usize {
         let n = self.panels.len();
         if self.prev != self.active && self.prev < n {
@@ -1565,6 +1573,14 @@ impl App {
 
     fn cmd_view(&mut self) {
         let Some(e) = self.active().current().cloned() else { return };
+        if self.active().remote.is_some() {
+            if !e.is_dir {
+                if let Some(tmp) = self.remote_fetch(self.active, &e) {
+                    viewer::show(self, &tmp);
+                }
+            }
+            return;
+        }
         if e.is_dir {
             fileops::folder_sizes(self);
         } else if self.active().arc.is_some() {
@@ -1622,6 +1638,9 @@ impl App {
         if self.active().arc.is_some() {
             return fileops::read_only(self);
         }
+        if self.active().remote.is_some() {
+            return self.remote_edit();
+        }
         let Some(e) = self.active().current().filter(|e| !e.is_dir).cloned() else { return };
         if editor::edit(self, &e.path) {
             self.reload_after_edit(&e.path);
@@ -1671,6 +1690,13 @@ impl App {
         if name.is_empty() || name == e.name {
             return;
         }
+        if let Some(cwd) = self.active().remote.as_ref().map(|r| r.cwd.clone()) {
+            let (a, from, to) = (self.active, e.path.to_string_lossy().replace('\\', "/"), crate::remote::join(&cwd, &name));
+            if let Err(m) = self.with_remote(a, |app, v| v.conn.rename(app, &from, &to)) {
+                dialogs::message(self, "Rename", &m, true);
+            }
+            return self.remote_reread_focus(a, Some(&name));
+        }
         let dst = self.active().dir.join(&name);
         match fs::rename(&e.path, &dst) {
             Ok(()) => {
@@ -1690,6 +1716,14 @@ impl App {
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
+        }
+        if let Some(cwd) = self.active().remote.as_ref().map(|r| r.cwd.clone()) {
+            let (a, path) = (self.active, crate::remote::join(&cwd, &name));
+            if let Err(m) = self.with_remote(a, |app, v| v.conn.mkdir(app, &path)) {
+                dialogs::message(self, "Make folder", &m, true);
+            }
+            let first = name.split('/').next().unwrap_or(&name).to_string();
+            return self.remote_reread_focus(a, Some(&first));
         }
         let full = self.active().dir.join(&name);
         match fs::create_dir_all(&full) {
@@ -2109,10 +2143,64 @@ impl App {
         false
     }
 
-    fn remote_reread(&mut self, i: usize) {
-        let Some(cwd) = self.panels[i].remote.as_ref().map(|r| r.cwd.clone()) else { return };
+    pub fn remote_reread(&mut self, i: usize) {
         let focus = self.panels[i].current().map(|e| e.name.clone());
-        self.remote_cd(i, &cwd, focus.as_deref());
+        self.remote_reread_focus(i, focus.as_deref());
+    }
+
+    /// Read the remote folder again, putting the cursor on `focus`.
+    pub fn remote_reread_focus(&mut self, i: usize, focus: Option<&str>) {
+        let Some(cwd) = self.panels[i].remote.as_ref().map(|r| r.cwd.clone()) else { return };
+        self.remote_cd(i, &cwd, focus);
+    }
+
+    /// Run `f` with panel i's server connection (taken out of the panel meanwhile).
+    pub fn with_remote<T>(&mut self, i: usize, f: impl FnOnce(&mut App, &mut crate::remote::RemoteView) -> crate::remote::R<T>) -> crate::remote::R<T> {
+        let Some(mut v) = self.panels[i].remote.take() else { return Err("Not connected.".into()) };
+        self.prompt_count.remove(&v.profile);
+        let r = f(self, &mut v);
+        self.panels[i].remote = Some(v);
+        r
+    }
+
+    /// Download a remote file to a temp folder (to view, open or edit it).
+    fn remote_fetch(&mut self, i: usize, e: &panel::Entry) -> Option<PathBuf> {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = crate::remote::temp_dir().join(format!("f{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let local = dir.join(&e.name);
+        let from = e.path.to_string_lossy().replace('\\', "/");
+        let r = fs::create_dir_all(&dir).map_err(|x| x.to_string()).and_then(|_| self.with_remote(i, |app, v| v.conn.get(app, &from, &local, false)));
+        match r {
+            Ok(()) => Some(local),
+            Err(m) if m == "Cancelled." => None,
+            Err(m) => {
+                dialogs::message(self, "Remote", &m, true);
+                None
+            }
+        }
+    }
+
+    /// F4 on a remote file: download, edit, and upload it again when it was saved.
+    fn remote_edit(&mut self) {
+        let a = self.active;
+        let Some(e) = self.panels[a].current().filter(|e| !e.is_dir && !e.is_up).cloned() else { return };
+        let Some(tmp) = self.remote_fetch(a, &e) else { return };
+        if !editor::edit(self, &tmp) {
+            return;
+        }
+        let to = e.path.to_string_lossy().replace('\\', "/");
+        loop {
+            match self.with_remote(a, |app, v| v.conn.put(app, &tmp, &to, false)) {
+                Ok(()) => break,
+                Err(m) => {
+                    let keep = format!("Your edited copy is {}", tmp.display());
+                    if dialogs::choice(self, "Upload", &["The file couldn't be saved on the server:", &m, &keep], &["Retry", "Cancel"], true) != Some(0) {
+                        return;
+                    }
+                }
+            }
+        }
+        self.remote_reread_focus(a, Some(&e.name));
     }
 
     /// Back to the local folder the panel showed before.
@@ -2178,7 +2266,11 @@ impl App {
         if (e.is_dir || e.is_link) && (self.remote_cd(i, &path, None) || e.is_dir) {
             return;
         }
-        dialogs::message(self, "Remote", "Opening files on a server comes in the next step.", false);
+        if let Some(tmp) = self.remote_fetch(i, &e) {
+            if let Err(err) = platform::open_default(&tmp) {
+                dialogs::message(self, "Error", &err.to_string(), true);
+            }
+        }
     }
 }
 

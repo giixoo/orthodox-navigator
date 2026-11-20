@@ -95,7 +95,6 @@ pub struct SftpConn {
     home: String,
     /// OpenSSH can ask through ON (8.4+); otherwise BatchMode (keys / agent only)
     askpass: bool,
-    version: (u32, u32),
     /// tests: run this program instead of sftp
     custom: Option<(std::ffi::OsString, Vec<std::ffi::OsString>)>,
 }
@@ -105,7 +104,7 @@ impl SftpConn {
         let version = crate::remote::openssh()?;
         let askpass = crate::remote::askpass_supported(version);
         let server = if askpass { Some(Server::start().map_err(|e| e.to_string())?) } else { None };
-        let mut c = SftpConn { profile: p.clone(), server, child: None, leftover: vec![], n: 0, home: "/".into(), askpass, version, custom: None };
+        let mut c = SftpConn { profile: p.clone(), server, child: None, leftover: vec![], n: 0, home: "/".into(), askpass, custom: None };
         match c.connect(ui) {
             Ok(()) => Ok(c),
             Err(e) if !askpass && e != "Cancelled." => Err(format!(
@@ -119,7 +118,7 @@ impl SftpConn {
     #[cfg(test)]
     fn with_command(p: Profile, cmd: Command) -> SftpConn {
         let custom = Some((cmd.get_program().to_owned(), cmd.get_args().map(|a| a.to_owned()).collect()));
-        SftpConn { profile: p, server: None, child: Some(Child::spawn(cmd).expect("spawn")), leftover: vec![], n: 0, home: "/".into(), askpass: false, version: (0, 0), custom }
+        SftpConn { profile: p, server: None, child: Some(Child::spawn(cmd).expect("spawn")), leftover: vec![], n: 0, home: "/".into(), askpass: false, custom }
     }
 
     fn command(&self) -> Command {

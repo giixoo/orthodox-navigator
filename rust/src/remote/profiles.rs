@@ -30,14 +30,6 @@ impl Proto {
         Proto::ALL.into_iter().find(|p| p.name().eq_ignore_ascii_case(s.trim()))
     }
 
-    pub fn default_port(self) -> u16 {
-        match self {
-            Proto::Sftp => 22,
-            Proto::Ftp | Proto::Ftps => 21,
-            Proto::FtpsImplicit => 990,
-        }
-    }
-
     /// The scheme shown in panel titles.
     pub fn scheme(self) -> &'static str {
         match self {
@@ -231,8 +223,6 @@ mod tests {
         assert_eq!(title(&p, "/var/www"), "sftp://deploy@example.org/var/www");
         assert_eq!(title(&sample().list[1], "/"), "ftps://me@10.0.0.5:990/");
         assert_eq!(Proto::parse("ftps-implicit"), Some(Proto::FtpsImplicit));
-        assert_eq!(Proto::Ftps.default_port(), 21);
-        assert_eq!(Proto::FtpsImplicit.default_port(), 990);
     }
 
     #[test]
