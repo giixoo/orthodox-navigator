@@ -167,7 +167,9 @@ pub fn write_private(f: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut fh = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(f)?;
+        // a fresh file, so one made beforehand (by anyone) can't keep its own owner or mode
+        let _ = fs::remove_file(f);
+        let mut fh = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(f)?;
         fh.write_all(data)
     }
     #[cfg(not(unix))]

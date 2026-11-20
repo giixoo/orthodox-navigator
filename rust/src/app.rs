@@ -848,12 +848,19 @@ impl App {
         let lay = self.layout();
         let q = self.quick.as_deref();
         let cur = self.panels[self.active].current().cloned();
-        let in_arc = self.panels[self.active].arc.is_some();
+        // entries that are not local files get a note instead of being read
+        let elsewhere = if self.panels[self.active].arc.is_some() {
+            Some("Inside an archive: F3 to view it.")
+        } else if self.panels[self.active].remote.is_some() {
+            Some("On a server: F3 to view it.")
+        } else {
+            None
+        };
         let cur_dir = self.panels[self.active].dir.clone();
         for (i, (x, pw)) in lay.into_iter().enumerate() {
             let active = i == self.active;
             match self.preview.as_mut() {
-                Some(p) if !active => p.draw(&mut self.screen, x, 0, pw, h - 2, cur.as_ref(), in_arc, &cur_dir),
+                Some(p) if !active => p.draw(&mut self.screen, x, 0, pw, h - 2, cur.as_ref(), elsewhere, &cur_dir),
                 _ => self.panels[i].draw(&mut self.screen, x, 0, pw, h - 2, active, if active { q } else { None }),
             }
         }
@@ -1241,11 +1248,11 @@ impl App {
                 true
             }
             KeyCode::F(3) => {
-                if shift { self.compare_files() } else { self.cmd_view() }
+                if shift { self.run_cmd(Cmd::CompareFiles) } else { self.cmd_view() }
                 true
             }
             KeyCode::F(4) => {
-                if shift { self.cmd_new_file() } else { self.cmd_edit() }
+                if shift { self.run_cmd(Cmd::NewFile) } else { self.cmd_edit() }
                 true
             }
             KeyCode::F(5) => {
@@ -1276,7 +1283,8 @@ impl App {
     }
 
     pub fn run_cmd(&mut self, c: Cmd) {
-        if self.panels[self.active].remote.is_some() && blocked_on_remote(&c) {
+        let passive_remote = self.panels[self.passive_idx()].remote.is_some() && matches!(c, Cmd::CompareFiles | Cmd::Compare);
+        if (self.panels[self.active].remote.is_some() && blocked_on_remote(&c)) || passive_remote {
             return dialogs::message(self, "Remote", "Not available in a remote panel.", false);
         }
         match c {
@@ -1899,6 +1907,10 @@ impl App {
     /// Put panel `i`'s folder (0 = left, 1 = right) on the command line.
     fn insert_panel_path(&mut self, i: usize) {
         let i = i.min(self.panels.len() - 1);
+        if let Some(r) = &self.panels[i].remote {
+            let t = r.title();
+            return self.cmd.insert(&t);
+        }
         let mut path = self.panels[i].dir.to_string_lossy().to_string();
         if !path.ends_with(std::path::MAIN_SEPARATOR) {
             path.push(std::path::MAIN_SEPARATOR);
@@ -2262,9 +2274,22 @@ impl App {
             }
             return;
         }
-        // a link may lead to a folder: try to enter it first
-        if (e.is_dir || e.is_link) && (self.remote_cd(i, &path, None) || e.is_dir) {
+        if e.is_dir {
+            self.remote_cd(i, &path, None);
             return;
+        }
+        // a link may lead to a folder: try it quietly; a link to a file opens the file
+        if e.is_link {
+            match self.with_remote(i, |app, v| v.conn.list(app, &path)) {
+                Ok(list) => {
+                    if let Some(r) = self.panels[i].remote.as_mut() {
+                        r.cwd = path.clone();
+                    }
+                    return self.panels[i].set_remote_items(&path, list, None);
+                }
+                Err(m) if m == "Cancelled." => return,
+                Err(_) => {}
+            }
         }
         if let Some(tmp) = self.remote_fetch(i, &e) {
             if let Err(err) = platform::open_default(&tmp) {

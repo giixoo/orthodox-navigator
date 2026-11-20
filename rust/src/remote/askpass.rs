@@ -80,7 +80,7 @@ pub fn kind(prompt: &str) -> PromptKind {
 }
 
 /// The helper's side: send the question to ON (env value "port:token") and wait for the answer.
-fn ask_with(env_value: &str, prompt: &str) -> Option<String> {
+pub fn ask_with(env_value: &str, prompt: &str) -> Option<String> {
     let (port, token) = env_value.split_once(':')?;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port.parse().ok()?));
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).ok()?;

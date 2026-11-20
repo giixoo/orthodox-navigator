@@ -48,7 +48,8 @@ pub fn quote_path(path: &str) -> String {
 }
 
 pub fn base_args(p: &Profile) -> Vec<String> {
-    let mut a: Vec<String> = ["-s", "-S", "--connect-timeout", "15", "-K", "-"].iter().map(|s| s.to_string()).collect();
+    // -g: [] and {} in names are not curl patterns
+    let mut a: Vec<String> = ["-s", "-S", "-g", "--connect-timeout", "15", "-K", "-"].iter().map(|s| s.to_string()).collect();
     if p.proto == Proto::Ftps {
         a.push("--ssl-reqd".into());
     }
@@ -235,8 +236,12 @@ impl Conn for FtpConn {
 
     fn put(&mut self, ui: &mut dyn Ui, local: &Path, remote: &str, is_dir: bool) -> R<()> {
         if is_dir {
-            // an existing folder is fine
-            let _ = self.mkdir(ui, remote);
+            // an existing folder is fine; Esc is not
+            if let Err(e) = self.mkdir(ui, remote) {
+                if e == "Cancelled." {
+                    return Err(e);
+                }
+            }
             let rd = std::fs::read_dir(local).map_err(|e| format!("{}: {e}", local.display()))?;
             for de in rd.flatten() {
                 let name = de.file_name().to_string_lossy().to_string();
@@ -295,6 +300,8 @@ mod tests {
         let mut p = prof(Proto::Ftps, None);
         let args = base_args(&p).join(" ");
         assert!(args.contains("--ssl-reqd") && args.contains("-K -"));
+        // [] and {} in file names are not curl patterns
+        assert!(base_args(&p).contains(&"-g".to_string()));
         assert!(!args.contains("-k ") && !args.ends_with("-k"));
         p.insecure = true;
         assert!(base_args(&p).contains(&"-k".to_string()));

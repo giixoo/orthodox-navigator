@@ -35,8 +35,16 @@ fn local_arg(p: &Path) -> R<String> {
     sftp_quote(&p.to_string_lossy().replace('\\', "/"))
 }
 
+/// sftp treats `*`, `?` and `[` in `ls`, `get`, `rm` and in `put`'s local source as patterns, even in
+/// quotes, and Windows' sftp can't escape them (it turns backslashes into `/`).
+fn has_glob(s: &str) -> bool {
+    s.contains(['*', '?', '['])
+}
+
+/// No `-q`: it would hide ssh's own errors (wrong password, changed host key). `--` keeps a host or user
+/// from a profile from becoming an option.
 pub fn sftp_args(p: &Profile, askpass: bool) -> Vec<String> {
-    let mut a: Vec<String> = vec!["-q".into()];
+    let mut a: Vec<String> = vec![];
     if let Some(port) = p.port {
         a.extend(["-P".into(), port.to_string()]);
     }
@@ -46,6 +54,7 @@ pub fn sftp_args(p: &Profile, askpass: bool) -> Vec<String> {
     if !askpass {
         a.extend(["-o".into(), "BatchMode=yes".into()]);
     }
+    a.push("--".into());
     a.push(if p.user.is_empty() { p.host.clone() } else { format!("{}@{}", p.user, p.host) });
     a
 }
@@ -132,7 +141,7 @@ impl SftpConn {
         let mut args = sftp_args(&self.profile, self.askpass);
         #[cfg(test)]
         if let Ok(kh) = std::env::var("ON_TEST_KNOWN_HOSTS") {
-            args.splice(1..1, ["-o".to_string(), format!("UserKnownHostsFile={kh}")]);
+            args.splice(0..0, ["-o".to_string(), format!("UserKnownHostsFile={kh}")]);
         }
         c.args(&args);
         let exe = std::env::current_exe();
@@ -245,6 +254,31 @@ impl SftpConn {
     fn name_of(path: &str) -> &str {
         path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
     }
+
+    /// Make `dir` sftp's current folder (`cd` doesn't treat the path as a pattern).
+    fn cd(&mut self, ui: &mut dyn Ui, dir: &str) -> R<()> {
+        self.run(ui, &format!("Reading {dir}..."), &format!("cd {}", sftp_quote(dir)?), Some(TIMEOUT)).map(|_| ())
+    }
+
+    /// Run `op` on a file by its bare name inside its folder; a name with pattern characters is
+    /// renamed to a plain temporary name first (rename takes names literally) and, if `back`, back after.
+    fn on_file(&mut self, ui: &mut dyn Ui, path: &str, back: bool, op: &mut dyn FnMut(&mut Self, &mut dyn Ui, &str) -> R<()>) -> R<()> {
+        let (dir, name) = crate::remote::parent(path).ok_or("Not a file.")?;
+        if !has_glob(&name) {
+            self.cd(ui, &dir)?;
+            return op(self, ui, &sftp_quote(&name)?);
+        }
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let tmp = format!(".on-tmp-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let tmp_path = crate::remote::join(&dir, &tmp);
+        self.rename(ui, path, &tmp_path)?;
+        let r = self.cd(ui, &dir).and_then(|_| op(self, ui, &sftp_quote(&tmp)?));
+        if back {
+            let b = self.rename(ui, &tmp_path, path);
+            return r.and(b);
+        }
+        r
+    }
 }
 
 impl Conn for SftpConn {
@@ -252,19 +286,57 @@ impl Conn for SftpConn {
         Ok(self.home.clone())
     }
 
+    /// `cd` into the folder, then a bare `ls -la`: a path given to `ls` would be a pattern. A link to
+    /// a file fails at `cd`, so it is not taken for a folder.
     fn list(&mut self, ui: &mut dyn Ui, dir: &str) -> R<Vec<RemoteEntry>> {
-        let cmd = format!("ls -la {}", sftp_quote(dir)?);
-        Ok(parse_ls_answer(&self.run(ui, &format!("Reading {dir}..."), &cmd, Some(TIMEOUT))?))
+        self.cd(ui, dir)?;
+        Ok(parse_ls_answer(&self.run(ui, &format!("Reading {dir}..."), "ls -la", Some(TIMEOUT))?))
     }
 
+    /// Folders are copied item by item: sftp's `get -r` into an existing folder would nest the copy.
     fn get(&mut self, ui: &mut dyn Ui, remote: &str, local: &Path, is_dir: bool) -> R<()> {
-        let cmd = format!("get {}{} {}", if is_dir { "-r " } else { "" }, sftp_quote(remote)?, local_arg(local)?);
-        self.run(ui, &format!("Copying {}...", Self::name_of(remote)), &cmd, None).map(|_| ())
+        if is_dir {
+            std::fs::create_dir_all(local).map_err(|e| format!("{}: {e}", local.display()))?;
+            for e in self.list(ui, remote)? {
+                self.get(ui, &crate::remote::join(remote, &e.name), &local.join(&e.name), e.is_dir && !e.is_link)?;
+            }
+            return Ok(());
+        }
+        let (title, dst) = (format!("Copying {}...", Self::name_of(remote)), local_arg(local)?);
+        self.on_file(ui, remote, true, &mut |c, ui, name| c.run(ui, &title, &format!("get {name} {dst}"), None).map(|_| ()))
     }
 
     fn put(&mut self, ui: &mut dyn Ui, local: &Path, remote: &str, is_dir: bool) -> R<()> {
-        let cmd = format!("put {}{} {}", if is_dir { "-r " } else { "" }, local_arg(local)?, sftp_quote(remote)?);
-        self.run(ui, &format!("Copying {}...", Self::name_of(remote)), &cmd, None).map(|_| ())
+        if is_dir {
+            match self.mkdir(ui, remote) {
+                // an existing folder is fine: the files go into it
+                Err(e) if !e.starts_with("remote mkdir") => return Err(e),
+                _ => {}
+            }
+            let rd = std::fs::read_dir(local).map_err(|e| format!("{}: {e}", local.display()))?;
+            for de in rd.flatten() {
+                let sub = de.path();
+                self.put(ui, &sub, &crate::remote::join(remote, &de.file_name().to_string_lossy()), sub.is_dir())?;
+            }
+            return Ok(());
+        }
+        let title = format!("Copying {}...", Self::name_of(remote));
+        // the local source is a pattern too: copy such a file to a plain name first
+        let plain = if has_glob(&local.to_string_lossy()) {
+            let dir = crate::remote::temp_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let t = dir.join(format!("put-{}", std::process::id()));
+            std::fs::copy(local, &t).map_err(|e| format!("{}: {e}", local.display()))?;
+            Some(t)
+        } else {
+            None
+        };
+        let cmd = format!("put {} {}", local_arg(plain.as_deref().unwrap_or(local))?, sftp_quote(remote)?);
+        let r = self.run(ui, &title, &cmd, None).map(|_| ());
+        if let Some(t) = plain {
+            let _ = std::fs::remove_file(t);
+        }
+        r
     }
 
     fn mkdir(&mut self, ui: &mut dyn Ui, path: &str) -> R<()> {
@@ -279,7 +351,8 @@ impl Conn for SftpConn {
             }
             return self.run(ui, &format!("Deleting {}...", Self::name_of(path)), &format!("rmdir {}", sftp_quote(path)?), Some(TIMEOUT)).map(|_| ());
         }
-        self.run(ui, &format!("Deleting {}...", Self::name_of(path)), &format!("rm {}", sftp_quote(path)?), Some(TIMEOUT)).map(|_| ())
+        let title = format!("Deleting {}...", Self::name_of(path));
+        self.on_file(ui, path, false, &mut |c, ui, name| c.run(ui, &title, &format!("rm {name}"), Some(TIMEOUT)).map(|_| ()))
     }
 
     fn rename(&mut self, ui: &mut dyn Ui, from: &str, to: &str) -> R<()> {
@@ -335,6 +408,9 @@ pub mod tests {
         assert!(a.windows(2).any(|w| w == ["-P", "2222"]));
         assert!(a.contains(&"BatchMode=yes".to_string()));
         assert_eq!(a.last().unwrap(), "u@h");
+        // a host or user from a profile can't turn into an option; ssh's own errors stay visible
+        assert_eq!(a[a.len() - 2], "--");
+        assert!(!a.contains(&"-q".to_string()));
         let b = sftp_args(&prof("alias", None, ""), true);
         assert!(!b.contains(&"-P".to_string()) && !b.contains(&"BatchMode=yes".to_string()));
         assert_eq!(b.last().unwrap(), "alias");
@@ -416,9 +492,46 @@ pub mod tests {
         c.get(&mut ui, &join(base, "tree"), &tmp.join("back"), true).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.join("back/sub/Документ #1.txt")).unwrap(), "hello");
         assert!(c.list(&mut ui, "/nope").is_err());
+
+        // copying a folder again merges into the copy instead of nesting it
+        c.put(&mut ui, &tmp.join("tree"), &join(base, "tree"), true).unwrap();
+        assert!(!c.list(&mut ui, &join(base, "tree")).unwrap().iter().any(|e| e.name == "tree"));
+        c.get(&mut ui, &join(base, "tree"), &tmp.join("back"), true).unwrap();
+        assert!(!tmp.join("back/tree").exists());
+
+        // names with glob characters next to their look-alikes
+        let g = join(base, "g");
+        c.mkdir(&mut ui, &g).unwrap();
+        for (name, text) in [("a1.txt", "one"), ("aq.txt", "question"), ("1.txt", "plain"), ("x.txt", "bracket")] {
+            std::fs::write(tmp.join(name), text).unwrap();
+            c.put(&mut ui, &tmp.join(name), &join(&g, name), false).unwrap();
+        }
+        c.rename(&mut ui, &join(&g, "aq.txt"), &join(&g, "a?.txt")).unwrap();
+        c.rename(&mut ui, &join(&g, "x.txt"), &join(&g, "[1].txt")).unwrap();
+        c.get(&mut ui, &join(&g, "[1].txt"), &tmp.join("got.txt"), false).unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.join("got.txt")).unwrap(), "bracket");
+        c.remove(&mut ui, &join(&g, "a?.txt"), false).unwrap();
+        let left: Vec<String> = c.list(&mut ui, &g).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(left.contains(&"a1.txt".to_string()) && !left.contains(&"a?.txt".to_string()), "{left:?}");
+        c.mkdir(&mut ui, &join(base, "[d]")).unwrap();
+        c.mkdir(&mut ui, &join(base, "d")).unwrap();
+        c.put(&mut ui, &tmp.join("a1.txt"), &join(base, "d/keep.txt"), false).unwrap();
+        assert!(c.list(&mut ui, &join(base, "[d]")).unwrap().is_empty());
+        c.remove(&mut ui, &join(base, "[d]"), true).unwrap();
+        assert!(c.list(&mut ui, &join(base, "d")).unwrap().iter().any(|e| e.name == "keep.txt"));
+
+        // a link to a file is not a folder
+        c.run(&mut ui, "link", &format!("symlink {} {}", sftp_quote(&join(&g, "a1.txt")).unwrap(), sftp_quote(&join(&g, "link")).unwrap()), Some(TIMEOUT)).unwrap();
+        assert!(c.list(&mut ui, &join(&g, "link")).is_err());
+
         c.remove(&mut ui, base, true).unwrap();
         assert!(!c.list(&mut ui, "/upload").unwrap().iter().any(|e| e.name == "on live #%"));
         c.close();
         let _ = std::fs::remove_dir_all(&tmp);
+
+        // a wrong password shows ssh's own reason
+        let mut bad = TestUi { password: "wrong".into() };
+        let e = SftpConn::open(&mut bad, &prof(host, port.parse().ok(), &user)).err().expect("wrong password must fail");
+        assert!(e.contains("Permission denied"), "{e}");
     }
 }

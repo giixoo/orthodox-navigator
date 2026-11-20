@@ -181,6 +181,11 @@ pub fn wait_until<T>(ui: &mut dyn Ui, title: &str, timeout: Option<Duration>, mu
                 let prompt = req.prompt.clone();
                 let a = ui.ask(profile, &prompt);
                 req.answer(a.as_deref());
+                // Esc in a password dialog ends the operation (ssh would send an empty password and
+                // ask again); "No" to a new host key is ssh's own way out
+                if a.is_none() && crate::remote::askpass::kind(&prompt) != crate::remote::askpass::PromptKind::HostKey {
+                    return Waited::Cancelled;
+                }
                 start = Instant::now();
                 shown = false;
             }
@@ -209,6 +214,24 @@ mod tests {
         let t0 = Instant::now();
         assert!(!deadline_passed(t0, Duration::from_secs(15), t0 + Duration::from_secs(14)));
         assert!(deadline_passed(t0, Duration::from_secs(15), t0 + Duration::from_secs(15)));
+    }
+
+    struct NoAnswer;
+    impl Ui for NoAnswer {
+        fn ask(&mut self, _: &Profile, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn esc_on_a_password_cancels() {
+        let mut srv = Server::start().unwrap();
+        let (_, v) = srv.env();
+        let helper = std::thread::spawn(move || crate::remote::askpass::ask_with(&v, "u@h's password: "));
+        let p = Profile { name: "t".into(), proto: crate::remote::profiles::Proto::Sftp, host: "h".into(), port: None, user: String::new(), folder: String::new(), save_password: false, password: None, insecure: false };
+        let r: Waited<()> = wait_until(&mut NoAnswer, "t", Some(Duration::from_secs(5)), Some((&mut srv, &p)), || None);
+        assert!(matches!(r, Waited::Cancelled));
+        assert_eq!(helper.join().unwrap(), None);
     }
 
     /// Prints many lines to both outputs when run by `large_output_no_deadlock` (ignored otherwise).
