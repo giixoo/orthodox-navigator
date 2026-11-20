@@ -4,7 +4,7 @@ All notable changes to Orthodox Navigator. The format follows [Keep a Changelog]
 and versions follow [Semantic Versioning](https://semver.org/). To release, add a section for the new version
 and push a tag `vX.Y.Z` (see "Release downloads" in the README); the section becomes the release notes.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-20
 
 ### Added
 

@@ -27,8 +27,8 @@ Then open a new terminal and type `on`.
       & ([scriptblock]::Create((irm https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.ps1))) -Uninstall
       curl -fsSL https://raw.githubusercontent.com/giixoo/orthodox-navigator/main/install.sh | sh -s -- --uninstall
 
-- **A specific version:** set `ON_VERSION` first: `$env:ON_VERSION='0.5.0'` in PowerShell, or
-  `... | ON_VERSION=0.5.0 sh`.
+- **A specific version:** set `ON_VERSION` first: `$env:ON_VERSION='0.6.0'` in PowerShell, or
+  `... | ON_VERSION=0.6.0 sh`.
 
 You can read the scripts before running them: [install.ps1](install.ps1), [install.sh](install.sh).
 
@@ -81,8 +81,8 @@ page has, for each version:
 A browser marks downloaded files, so Windows (SmartScreen) and macOS (Gatekeeper) warn about the unsigned
 program. Files downloaded from the terminal are not marked, so nothing warns:
 
-    Invoke-WebRequest https://github.com/giixoo/orthodox-navigator/releases/download/v0.5.0/on-0.5.0-windows-x64.exe -OutFile on.exe
-    curl -fLo on https://github.com/giixoo/orthodox-navigator/releases/download/v0.5.0/on-0.5.0-linux-x64 && chmod +x on
+    Invoke-WebRequest https://github.com/giixoo/orthodox-navigator/releases/download/v0.6.0/on-0.6.0-windows-x64.exe -OutFile on.exe
+    curl -fLo on https://github.com/giixoo/orthodox-navigator/releases/download/v0.6.0/on-0.6.0-linux-x64 && chmod +x on
 
 To clear the mark from a browser download, run `Unblock-File <file>` on Windows (unblock a zip before
 unpacking it) or `xattr -d com.apple.quarantine <file>` on macOS. On Linux nothing is marked, but a browser
