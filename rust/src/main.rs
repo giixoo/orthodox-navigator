@@ -19,6 +19,7 @@ mod menu;
 mod panel;
 mod platform;
 mod preview;
+mod remote;
 mod rename;
 mod attrs;
 mod colors;
@@ -40,6 +41,13 @@ mod vscode;
 use std::io::IsTerminal;
 
 fn main() {
+    // run by ssh as its SSH_ASKPASS (ssh passes only the prompt; ON_ASKPASS is set by ON for its own
+    // sftp processes): pass the question to the running ON (remote panels)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if std::env::var_os(remote::askpass::ENV).is_some() {
+        std::process::exit(remote::askpass::helper_main(args.first().map(String::as_str).unwrap_or("")));
+    }
+
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         eprintln!("Orthodox Navigator needs an interactive terminal.");
         eprintln!("Run it directly in a terminal window (not through a pipe or another tool).");
@@ -57,7 +65,6 @@ fn main() {
         default_hook(info);
     }));
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut app = app::App::new(&args);
     let result = app.run();
     app.screen.shutdown();

@@ -37,6 +37,9 @@ pub fn read_only(app: &mut App) {
 }
 
 pub fn copy_or_move(app: &mut App, mv: bool) {
+    if app.active().remote.is_some() || (app.passive().remote.is_some() && app.passive_index() != app.active_index()) {
+        return remote_copy(app, mv);
+    }
     if app.active().arc.is_some() {
         if mv { read_only(app) } else { extract_out(app) }
         return;
@@ -183,6 +186,9 @@ fn move_entry(app: &mut App, c: &mut Ctx, src: &Path, dst: &Path, is_dir: bool) 
 }
 
 pub fn delete(app: &mut App, permanent: bool) {
+    if app.active().remote.is_some() {
+        return remote_delete(app);
+    }
     if app.active().arc.is_some() {
         return read_only(app);
     }
@@ -442,4 +448,207 @@ fn extract_out(app: &mut App) {
         }
     }
     app.passive().load(None);
+}
+
+// ------------------------------------------------------------------ remote panels
+
+/// A path on the server from an entry of a remote panel.
+fn rpath(e: &Entry) -> String {
+    e.path.to_string_lossy().replace('\\', "/")
+}
+
+/// The file's own name (in search results `name` is a relative path).
+fn own_name(e: &Entry) -> String {
+    e.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| e.name.clone())
+}
+
+/// Where `name` goes on the server, from what was typed in the copy dialog: a folder (ending in `/`,
+/// empty, or several items) gets the name added; otherwise it is the new name.
+pub fn remote_dest(cwd: &str, input: &str, name: &str, many: bool) -> String {
+    let input = input.trim();
+    let base = if input.is_empty() {
+        cwd.to_string()
+    } else if input.starts_with('/') {
+        input.to_string()
+    } else {
+        crate::remote::join(cwd, input)
+    };
+    if many || input.is_empty() || base.ends_with('/') {
+        crate::remote::join(base.trim_end_matches('/'), name)
+    } else {
+        base
+    }
+}
+
+/// Ask about an error in the middle of several items: true to go on (skip), false to stop.
+fn skip_or_cancel(app: &mut App, c: &mut Ctx, name: &str, msg: &str) -> bool {
+    if msg == "Cancelled." || dialogs::choice(app, "Error", &[name, msg], &["Skip", "Cancel"], true) != Some(0) {
+        c.cancel = true;
+        return false;
+    }
+    c.skips += 1;
+    true
+}
+
+/// F5 / F6 when one of the panels (or both) shows a server.
+fn remote_copy(app: &mut App, mv: bool) {
+    let (a, p) = (app.active_index(), app.passive_index());
+    let (a_rem, p_rem) = (app.panels[a].remote.is_some(), app.panels[p].remote.is_some());
+    if a_rem && app.panels[p].temp {
+        return dialogs::message(app, "Temp panel", "The Temp panel holds local files only.", false);
+    }
+    if p_rem && app.panels[a].arc.is_some() {
+        return dialogs::message(app, "Archive", "Copy the files out of the archive to a local folder first.", false);
+    }
+    let src: Vec<Entry> = app.panels[a].targets().into_iter().filter(|e| !e.is_up).collect();
+    if src.is_empty() {
+        return;
+    }
+    let what = if src.len() == 1 { format!("\"{}\"", src[0].name) } else { format!("{} items", src.len()) };
+    let (title, verb) = if mv { ("Rename/Move", "Move") } else { ("Copy", "Copy") };
+    let mut c = Ctx::new(if mv { "Move" } else { "Copy" });
+
+    if a_rem && !p_rem {
+        // from the server to a local folder
+        let mut def = app.panels[p].dir.to_string_lossy().to_string();
+        if !def.ends_with(MAIN_SEPARATOR) {
+            def.push(MAIN_SEPARATOR);
+        }
+        let Some(input) = dialogs::input(app, title, &format!("{verb} {what} to:"), &def) else { return };
+        let input = input.trim().trim_matches('"').to_string();
+        if input.is_empty() {
+            return;
+        }
+        let full = normalize(&app.panels[p].dir.join(&input));
+        let into_dir = input.ends_with('/') || input.ends_with('\\') || full.is_dir() || src.len() > 1;
+        if into_dir {
+            if let Err(e) = fs::create_dir_all(&full) {
+                return dialogs::message(app, "Error", &e.to_string(), true);
+            }
+        }
+        for e in &src {
+            if c.cancel {
+                break;
+            }
+            let dst = if into_dir { full.join(crate::remote::local_name(&own_name(e))) } else { full.clone() };
+            if dst.exists() && !e.is_dir && !ask_overwrite(app, &mut c, &dst) {
+                continue;
+            }
+            let from = rpath(e);
+            let mut r = app.with_remote(a, |app, v| v.conn.get(app, &from, &dst, e.is_dir));
+            if r.is_ok() && mv {
+                r = app.with_remote(a, |app, v| v.conn.remove(app, &from, e.is_dir && !e.is_link));
+            }
+            match r {
+                Ok(()) => unselect(app, &e.name),
+                Err(m) => {
+                    if !skip_or_cancel(app, &mut c, &e.name, &m) {
+                        break;
+                    }
+                }
+            }
+        }
+        app.remote_reread(a);
+        let focus = if !into_dir { full.file_name().map(|n| n.to_string_lossy().to_string()) } else { None };
+        app.panels[p].load(focus.as_deref());
+        return;
+    }
+
+    // to a server: from a local panel, or from another server through a temp folder
+    let cwd = app.panels[p].remote.as_ref().map(|r| r.cwd.clone()).unwrap_or_else(|| "/".into());
+    let label = app.panels[p].remote.as_ref().map(|r| r.base.clone()).unwrap_or_default();
+    let def = if cwd.ends_with('/') { cwd.clone() } else { format!("{cwd}/") };
+    let Some(input) = dialogs::input(app, title, &format!("{verb} {what} to {label}:"), &def) else { return };
+    let there: std::collections::HashSet<String> = app.panels[p].items.iter().map(|e| e.name.clone()).collect();
+    let mut last = None;
+    for (n, e) in src.iter().enumerate() {
+        if c.cancel {
+            break;
+        }
+        let name = own_name(e);
+        let dst = remote_dest(&cwd, &input, &name, src.len() > 1);
+        let here = crate::remote::parent(&dst).is_some_and(|(up, nm)| up == cwd && there.contains(&nm));
+        if here && !e.is_dir && !ask_overwrite(app, &mut c, Path::new(&dst)) {
+            continue;
+        }
+        let r = if a_rem {
+            let tmp = crate::remote::temp_dir().join(format!("xfer-{n}"));
+            let _ = fs::create_dir_all(&tmp);
+            let local = tmp.join(crate::remote::local_name(&name));
+            let from = rpath(e);
+            let mut r = app.with_remote(a, |app, v| v.conn.get(app, &from, &local, e.is_dir));
+            if r.is_ok() {
+                r = app.with_remote(p, |app, v| v.conn.put(app, &local, &dst, e.is_dir));
+            }
+            let _ = fs::remove_dir_all(&tmp);
+            if r.is_ok() && mv {
+                r = app.with_remote(a, |app, v| v.conn.remove(app, &from, e.is_dir && !e.is_link));
+            }
+            r
+        } else {
+            let mut r = app.with_remote(p, |app, v| v.conn.put(app, &e.path, &dst, e.is_dir));
+            if r.is_ok() && mv {
+                r = if e.is_dir { fs::remove_dir_all(&e.path) } else { fs::remove_file(&e.path) }.map_err(|x| x.to_string());
+            }
+            r
+        };
+        match r {
+            Ok(()) => {
+                unselect(app, &e.name);
+                last = crate::remote::parent(&dst).map(|(_, nm)| nm);
+            }
+            Err(m) => {
+                if !skip_or_cancel(app, &mut c, &e.name, &m) {
+                    break;
+                }
+            }
+        }
+    }
+    if a_rem {
+        app.remote_reread(a);
+    } else {
+        app.panels[a].load(None);
+    }
+    let focus = if src.len() == 1 { last } else { None };
+    app.remote_reread_focus(p, focus.as_deref());
+}
+
+/// F8 in a remote panel: there is no trash on a server.
+fn remote_delete(app: &mut App) {
+    let a = app.active_index();
+    let src: Vec<Entry> = app.panels[a].targets().into_iter().filter(|e| !e.is_up).collect();
+    if src.is_empty() {
+        return;
+    }
+    let what = if src.len() == 1 { format!("\"{}\"?", src[0].name) } else { format!("{} items?", src.len()) };
+    if dialogs::choice(app, "Delete", &["Delete on the server (this can't be undone)", &what], &["Delete", "Cancel"], true) != Some(0) {
+        return;
+    }
+    let mut c = Ctx::new("Delete");
+    for e in &src {
+        if c.cancel {
+            break;
+        }
+        let path = rpath(e);
+        if let Err(m) = app.with_remote(a, |app, v| v.conn.remove(app, &path, e.is_dir && !e.is_link)) {
+            if !skip_or_cancel(app, &mut c, &e.name, &m) {
+                break;
+            }
+        }
+    }
+    app.remote_reread(a);
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn remote_dest_paths() {
+        assert_eq!(remote_dest("/srv", "/srv/", "a.txt", false), "/srv/a.txt");
+        assert_eq!(remote_dest("/srv", "sub/", "a.txt", false), "/srv/sub/a.txt");
+        assert_eq!(remote_dest("/srv", "b.txt", "a.txt", false), "/srv/b.txt");
+        assert_eq!(remote_dest("/srv", "/x", "a.txt", true), "/x/a.txt");
+        assert_eq!(remote_dest("/", "", "a.txt", false), "/a.txt");
+    }
 }

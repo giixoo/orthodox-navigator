@@ -13,7 +13,7 @@ one to press it. Hold Shift, Ctrl or Alt (Windows) to see what the keys do with 
 | **Ctrl+\\** | the root of the drive |
 | **Tab / Shift+Tab** | the other panel (or the [preview](preview.md) when it is on) |
 | **Alt+letter** | quick search: jump to names starting with what you type |
-| **Alt+F1 / Alt+F2** | [drives and favourites](favorites.md) for the left / right panel |
+| **Alt+F1 / Alt+F2** | [drives and favourites](favorites.md) for the left / right panel, and [servers](remote.md) |
 | **Alt+F10** | [directory tree](tree.md) |
 | **Alt+F7** | [find files](find.md) |
 | **Alt+Backspace** | folder history: the folders you were in, newest first (type to filter, Del removes one) |

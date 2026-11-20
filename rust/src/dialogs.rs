@@ -87,6 +87,14 @@ impl LineEdit {
         s.text(x, y, &visible, fg, bg);
         s.cursor = Some((x + (self.pos - self.scroll) as i32, y));
     }
+
+    /// Draw as `*` (passwords).
+    pub fn draw_masked(&mut self, s: &mut Screen, x: i32, y: i32, w: i32, fg: C, bg: C) {
+        let real = std::mem::take(&mut self.text);
+        self.text = vec!['*'; real.len()];
+        self.draw(s, x, y, w, fg, bg);
+        self.text = real;
+    }
 }
 
 /// Colours for one dialog: normal (theme) or warning (red).

@@ -8,6 +8,12 @@ and push a tag `vX.Y.Z` (see "Release downloads" in the README); the section bec
 
 ### Added
 
+- **Remote panels**: browse and work on folders on servers over SFTP (the system `sftp`: your ssh config,
+  keys and agent) and FTP / FTPS (the system `curl`). Connections are saved in the drive list
+  (Alt+F1 / Alt+F2, Ins / F4 / F8); view, edit, copy and move both ways (also server to server), make
+  folders, rename, delete. Passwords and "trust this server?" are asked inside ON (OpenSSH 8.4+); saved
+  passwords are encrypted with a master password, asked once until you quit ON (Options → Change master
+  password / Forget saved passwords). Self-signed FTPS certificates can be accepted per connection.
 - **User menu** (F9): the folder's own menu (`.on-menu` here or above), a global menu, and commands for the
   file under the cursor by its name (Options → Commands for file types); the one named Enter runs on Enter.
   Macros `!.!`, `!`, `!\`, `!&`, `!@`.

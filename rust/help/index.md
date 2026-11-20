@@ -12,6 +12,7 @@ the command line with `on`, do the job, leave.
 - [Preview panel](preview.md) - Ctrl+L
 - [Directory tree](tree.md) - Alt+F10
 - [Drives and favourites](favorites.md) - Alt+F1 / Alt+F2
+- [Remote panels: SFTP and FTP](remote.md) - in the drive list
 - [Find files](find.md) - Alt+F7
 - [Compare files and git](diff.md) - Shift+F3, Alt+F3
 - [Batch rename](rename.md) - Alt+F6

@@ -25,6 +25,8 @@ pub enum Pick {
     Folder(PathBuf),
     /// the Temp panel
     Temp,
+    /// a remote connection (its name)
+    Remote(String),
 }
 
 fn file() -> Option<PathBuf> {
@@ -84,6 +86,50 @@ enum Row {
     Temp,
     Sep,
     Fav(usize),
+    /// the "Remote" header
+    RemoteSep,
+    /// a connection profile
+    Remote(usize),
+    /// "New connection..."
+    NewRemote,
+}
+
+/// Add or edit a connection profile (Ins / F4 in the Remote part); returns its index.
+fn edit_remote(app: &mut App, k: Option<usize>) -> Option<usize> {
+    let taken: Vec<String> = app.remote_profiles.list.iter().enumerate().filter(|(i, _)| Some(*i) != k).map(|(_, p)| p.name.clone()).collect();
+    let old = k.and_then(|k| app.remote_profiles.list.get(k).cloned());
+    let p = crate::remote::ui::edit_profile(app, old.as_ref(), &taken)?;
+    let old_name = old.map(|o| o.name);
+    let mut clash = false;
+    // change the file as it is now (another ON window may have changed it): by name, not position
+    let r = crate::remote::profiles::update(|all| {
+        let at = old_name.as_ref().and_then(|n| all.list.iter().position(|x| &x.name == n));
+        if all.list.iter().enumerate().any(|(i, x)| Some(i) != at && x.name.eq_ignore_ascii_case(&p.name)) {
+            clash = true;
+            return;
+        }
+        match at {
+            Some(i) => {
+                // the saved password is the one on disk (it may be newer than this window's copy)
+                let pw = all.list[i].password.clone();
+                all.list[i] = p.clone();
+                all.list[i].password = if p.save_password { pw } else { None };
+            }
+            None => all.list.push(p.clone()),
+        }
+    });
+    match r {
+        Ok(all) => app.remote_profiles = all,
+        Err(e) => {
+            dialogs::message(app, "Remote", &format!("Can't save the connections: {e}"), true);
+            return None;
+        }
+    }
+    if clash {
+        dialogs::message(app, "Remote", "Another connection has this name (made in another ON window).", true);
+        return None;
+    }
+    app.remote_profiles.list.iter().position(|x| x.name == p.name)
 }
 
 /// The drive / favourites list. `current` is the panel's folder (for Ins and the initial cursor).
@@ -101,6 +147,8 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
         })
         .collect();
     let mut favs = load();
+    // connections as they are on disk now (another ON window may have changed them)
+    app.remote_profiles = crate::remote::profiles::load();
     let cur_vol = platform::volume_of(current);
     let mut sel: Option<usize> = None;
     let mut top = 0usize;
@@ -111,6 +159,10 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
         rows.push(Row::Temp);
         rows.push(Row::Sep);
         rows.extend((0..favs.len()).map(Row::Fav));
+        rows.push(Row::RemoteSep);
+        let remotes: Vec<String> = app.remote_profiles.list.iter().map(|p| format!("{}\t{}", p.name, crate::remote::profiles::title(p, &p.folder))).collect();
+        rows.extend((0..remotes.len()).map(Row::Remote));
+        rows.push(Row::NewRemote);
         let sel_i = *sel.get_or_insert_with(|| {
             // start on the favourite we're in, else the current drive
             (0..favs.len())
@@ -133,7 +185,7 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
         if sel_i >= top + visible {
             top = sel_i + 1 - visible;
         }
-        let (favs_ref, rows_ref, cur_top) = (&favs, &rows, top);
+        let (favs_ref, rows_ref, cur_top, remotes_ref) = (&favs, &rows, top, &remotes);
         let inp = app.window_input(
             &mut |s| {
                 let t = theme::current();
@@ -149,6 +201,19 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                         Row::Sep => {
                             s.hline(x + 3, ry, w - 6, '─', t.dlg_fg, t.dlg_bg);
                             s.text(x + 5, ry, " Favourites  (F7 add, F4 edit, F8 remove) ", t.dlg_fg, t.dlg_bg);
+                        }
+                        Row::RemoteSep => {
+                            s.hline(x + 3, ry, w - 6, '─', t.dlg_fg, t.dlg_bg);
+                            s.text(x + 5, ry, " Remote  (Ins new, F4 edit, F8 delete) ", t.dlg_fg, t.dlg_bg);
+                        }
+                        Row::Remote(k) => {
+                            let (name, url) = remotes_ref[*k].split_once('\t').unwrap_or(("", ""));
+                            let nw = 16usize.min(inner / 2);
+                            let line = format!("   {:<nw$} {}", fit(name, nw), fit_left(url, inner.saturating_sub(nw + 5)));
+                            s.text(x + 3, ry, &fit(&line, inner), fg, bg);
+                        }
+                        Row::NewRemote => {
+                            s.text(x + 3, ry, &fit("   New connection...", inner), fg, bg);
                         }
                         Row::Temp => {
                             let n = crate::temp::load().len();
@@ -186,9 +251,17 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                 Row::Vol(p, _) => Some(Pick::Volume(p.clone())),
                 Row::Fav(k) => Some(Pick::Folder(favs[*k].path.clone())),
                 Row::Temp => Some(Pick::Temp),
-                Row::Sep => None,
+                Row::Remote(k) => app.remote_profiles.list.get(*k).map(|p| Pick::Remote(p.name.clone())),
+                Row::Sep | Row::RemoteSep | Row::NewRemote => None,
             }
         };
+        let remote_at = |i: usize| match rows.get(i) {
+            Some(Row::Remote(k)) => Some(*k),
+            _ => None,
+        };
+        let in_remote = matches!(rows.get(sel_i), Some(Row::Remote(_) | Row::NewRemote));
+        let new_remote_row = matches!(rows.get(sel_i), Some(Row::NewRemote));
+        let first_remote = rows.iter().position(|r| matches!(r, Row::RemoteSep)).unwrap_or(0) + 1;
         let fav_at = |i: usize| match rows.get(i) {
             Some(Row::Fav(k)) => Some(*k),
             _ => None,
@@ -197,7 +270,7 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
             let mut i = from;
             loop {
                 i = if down { (i + 1) % rows.len() } else { (i + rows.len() - 1) % rows.len() };
-                if !matches!(rows[i], Row::Sep) {
+                if !matches!(rows[i], Row::Sep | Row::RemoteSep) {
                     return i;
                 }
             }
@@ -208,6 +281,16 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                 let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                 match k.code {
                     KeyCode::Esc => return None,
+                    KeyCode::Enter if new_remote_row => {
+                        if let Some(k) = edit_remote(app, None) {
+                            return app.remote_profiles.list.get(k).map(|p| Pick::Remote(p.name.clone()));
+                        }
+                    }
+                    KeyCode::Insert if in_remote => {
+                        if let Some(k) = edit_remote(app, None) {
+                            sel = Some(first_remote + k);
+                        }
+                    }
                     KeyCode::Enter => {
                         if let Some(p) = choose(sel_i) {
                             return Some(p);
@@ -237,6 +320,20 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                         if add_to(app, &mut favs, current) {
                             sel = Some(vol_rows.len() + 1 + favs.len());
                         }
+                    }
+                    KeyCode::Delete | KeyCode::F(8) if remote_at(sel_i).is_some() => {
+                        let k = remote_at(sel_i).unwrap_or(0);
+                        let name = app.remote_profiles.list[k].name.clone();
+                        let q = format!("Delete the connection \"{name}\"?");
+                        if dialogs::choice(app, "Remote", &[&q], &["Delete", "Cancel"], false) == Some(0) {
+                            match crate::remote::profiles::update(|all| all.list.retain(|p| p.name != name)) {
+                                Ok(all) => app.remote_profiles = all,
+                                Err(e) => dialogs::message(app, "Remote", &format!("Can't save the connections: {e}"), true),
+                            }
+                        }
+                    }
+                    KeyCode::F(4) if remote_at(sel_i).is_some() => {
+                        edit_remote(app, remote_at(sel_i));
                     }
                     KeyCode::Delete | KeyCode::F(8) => {
                         if let Some(f) = fav_at(sel_i) {
@@ -293,10 +390,14 @@ pub fn pick(app: &mut App, title: &str, current: &Path) -> Option<Pick> {
                         let r = my - y - 2;
                         if r >= 0 && (r as usize) < visible && mx > x + 2 && mx < x + w - 3 {
                             let i = top + r as usize;
-                            if i < rows.len() && !matches!(rows[i], Row::Sep) {
+                            if i < rows.len() && !matches!(rows[i], Row::Sep | Row::RemoteSep) {
                                 let double = last_click.is_some_and(|(at, j)| j == i && at.elapsed().as_millis() < 400);
                                 sel = Some(i);
-                                if double {
+                                if double && matches!(rows[i], Row::NewRemote) {
+                                    if let Some(k) = edit_remote(app, None) {
+                                        return app.remote_profiles.list.get(k).map(|p| Pick::Remote(p.name.clone()));
+                                    }
+                                } else if double {
                                     return choose(i);
                                 }
                                 last_click = Some((Instant::now(), i));

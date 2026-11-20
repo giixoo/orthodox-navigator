@@ -131,6 +131,10 @@ Ctrl+C inside a command also stops the loop (you are left at the shell prompt).
   escape/unescape, JWT decode and verify (HS256/384/512) and sign (HS256), SHA-256, regex tester with match
   highlighting, GUID, Lorem ipsum and password generators (F6 makes new ones). The text tools start with the
   file under the cursor in Input; or type, paste, load another file (F3); F5 saves the result, F2 copies it.
+- **Remote panels**: a panel can show a folder on a server over **SFTP** or **FTP / FTPS** and work on it
+  like a local one (view, edit, copy both ways, rename, delete). Saved connections are in the drive list
+  (Alt+F1 / Alt+F2); saved passwords are encrypted with a master password. It uses the system's `sftp`
+  (OpenSSH; your `~/.ssh/config`, keys and agent work) and `curl`; passwords asked inside ON need OpenSSH 8.4+.
 - **User menu** (F9): your commands for this folder (`.on-menu`, e.g. build / test / deploy), for this kind of
   file (Enter runs a file's own command: `*.py` → `python "!.!"`), and global ones; macros for the file name,
   folder and selected files.
@@ -214,6 +218,7 @@ other systems don't tell programs about a modifier pressed on its own). Esc clos
 
 - F8 moves files to the desktop Trash (`~/.local/share/Trash`); Shift+F8 deletes permanently.
 - Alt+F1/F2 lists your home folder and mounted disks instead of drive letters.
+- Remote panels need `sftp` (package `openssh-client`) and `curl`.
 - Hidden files are dot-files; files with the executable bit are shown as programs and run on Enter.
 - Some desktop terminals keep Alt+F1/F2 or F10 for themselves; click the key bar or the top row instead.
 - With the mouse on, select text in the terminal with Shift+drag.

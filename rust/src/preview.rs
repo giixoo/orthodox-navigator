@@ -73,7 +73,8 @@ fn folder_info(p: &Path) -> Vec<String> {
 
 impl Preview {
     /// Make sure the content is for `entry`.
-    fn load(&mut self, entry: Option<&Entry>, in_archive: bool, dir: &Path) {
+    /// `elsewhere`: the entries are not local files (an archive, a server); the note says so.
+    fn load(&mut self, entry: Option<&Entry>, elsewhere: Option<&str>, dir: &Path) {
         let key = match entry {
             Some(e) if !e.is_up => e.path.clone(),
             _ => dir.to_path_buf(),
@@ -84,11 +85,11 @@ impl Preview {
         self.top = 0;
         self.left = 0;
         self.content = Some(match entry {
-            Some(e) if in_archive => Content::Info(vec![
+            Some(e) if elsewhere.is_some() => Content::Info(vec![
                 format!("Name\t{}", e.name),
                 format!("Size\t{} bytes", n0(e.size.unwrap_or(0))),
                 String::new(),
-                "Inside an archive: F3 to view it.".into(),
+                elsewhere.unwrap_or_default().to_string(),
             ]),
             Some(e) if !e.is_up && !e.is_dir => match TextDoc::open(&e.path, MAX_PREVIEW) {
                 Ok(mut d) => {
@@ -132,8 +133,8 @@ impl Preview {
         l
     }
 
-    pub fn draw(&mut self, s: &mut Screen, x: i32, y: i32, w: i32, h: i32, entry: Option<&Entry>, in_archive: bool, dir: &Path) {
-        self.load(entry, in_archive, dir);
+    pub fn draw(&mut self, s: &mut Screen, x: i32, y: i32, w: i32, h: i32, entry: Option<&Entry>, elsewhere: Option<&str>, dir: &Path) {
+        self.load(entry, elsewhere, dir);
         let t = theme::current();
         s.fill(x, y, w, h, ' ', t.file, t.panel_bg);
         s.boxed(x, y, w, h, t.frame, t.panel_bg, t.double_frame);
@@ -175,5 +176,25 @@ impl Preview {
         let title = format!(" Preview: {} ", fit_left(&name, (w - 16).max(4) as usize));
         let (tf, tb) = if self.focused { (t.active_title_fg, t.active_title_bg) } else { (t.title_fg, t.title_bg) };
         s.text(x + (w - title.chars().count() as i32) / 2, y, &title, tf, tb);
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn server_files_are_not_read_locally() {
+        // a server path that happens to exist locally too
+        let f = std::env::temp_dir().join(format!("on-preview-{}.txt", std::process::id()));
+        std::fs::write(&f, "local text").unwrap();
+        let e = Entry { name: "x.txt".into(), path: f.clone(), is_dir: false, is_up: false, is_link: false, selected: false, size: Some(3), modified: None, hidden: false, exec: false, arc: None };
+        let mut p = Preview::default();
+        p.load(Some(&e), Some("On a server: F3 to view it."), Path::new("."));
+        match &p.content {
+            Some(Content::Info(lines)) => assert!(lines.iter().any(|l| l.contains("On a server")), "{lines:?}"),
+            _ => panic!("read the local file"),
+        }
+        let _ = std::fs::remove_file(f);
     }
 }
