@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::remote::askpass::Server;
+use crate::remote::profiles::Profile;
 
 /// A running program with its output collected line by line on two threads (so a big output can't
 /// fill a pipe and stall it).
@@ -126,15 +127,46 @@ pub fn deadline_passed(start: Instant, timeout: Duration, now: Instant) -> bool 
     now.duration_since(start) >= timeout
 }
 
-/// Answers ssh's questions (the prompt text) with a dialog; None cancels.
-pub type Answerer<'a> = &'a mut dyn FnMut(&mut App, &str) -> Option<String>;
+/// What waiting needs from the screen: a progress box, Esc, and answers to ssh's questions. `App`
+/// implements it; tests use a stand-in.
+pub trait Ui {
+    /// Show (once) that something is going on.
+    fn progress(&mut self, _title: &str) {}
+    /// True when the user pressed Esc since the last call.
+    fn esc_pressed(&mut self) -> bool {
+        false
+    }
+    /// Answer a question from ssh (password, passphrase, "trust this host?") for this profile; None
+    /// cancels.
+    fn ask(&mut self, profile: &Profile, prompt: &str) -> Option<String>;
+}
 
-/// Wait until `poll` returns something. The screen gets a progress box after 300 ms, Esc cancels,
-/// questions from the askpass channel are answered (the time spent in a dialog doesn't count), and
-/// after `timeout` with no result it gives up. `poll` returning Err(()) means "progress, restart the
-/// clock" (e.g. output arrived but the answer isn't complete yet).
-pub fn wait_until<T>(app: &mut App, title: &str, timeout: Duration, mut askpass: Option<(&mut Server, Answerer)>, mut poll: impl FnMut() -> Option<Result<T, ()>>) -> Waited<T> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+impl Ui for App {
+    fn progress(&mut self, title: &str) {
+        crate::dialogs::progress(self, title, &[title.to_string(), "Esc to cancel".to_string()]);
+    }
+
+    fn esc_pressed(&mut self) -> bool {
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+        let mut esc = false;
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            if let Ok(Event::Key(k)) = event::read() {
+                esc |= k.kind != KeyEventKind::Release && k.code == KeyCode::Esc;
+            }
+        }
+        esc
+    }
+
+    fn ask(&mut self, profile: &Profile, prompt: &str) -> Option<String> {
+        crate::remote::answer_prompt(self, profile, prompt)
+    }
+}
+
+/// Wait until `poll` returns something. A progress box shows after 300 ms, Esc cancels, questions from
+/// the askpass channel are answered (time spent in a dialog doesn't count), and after `timeout` with
+/// no result it gives up (`None` = no timeout). `poll` returning Err(()) means "progress, restart the
+/// clock" (output arrived but the answer isn't complete yet).
+pub fn wait_until<T>(ui: &mut dyn Ui, title: &str, timeout: Option<Duration>, mut askpass: Option<(&mut Server, &Profile)>, mut poll: impl FnMut() -> Option<Result<T, ()>>) -> Waited<T> {
     let mut start = Instant::now();
     let first = start;
     let mut shown = false;
@@ -144,31 +176,27 @@ pub fn wait_until<T>(app: &mut App, title: &str, timeout: Duration, mut askpass:
             Some(Err(())) => start = Instant::now(),
             None => {}
         }
-        if let Some((srv, answer)) = askpass.as_mut() {
+        if let Some((srv, profile)) = askpass.as_mut() {
             if let Some(req) = srv.poll() {
                 let prompt = req.prompt.clone();
-                let a = answer(app, &prompt);
+                let a = ui.ask(profile, &prompt);
                 req.answer(a.as_deref());
                 start = Instant::now();
                 shown = false;
             }
         }
-        while event::poll(Duration::ZERO).unwrap_or(false) {
-            if let Ok(Event::Key(k)) = event::read() {
-                if k.kind != KeyEventKind::Release && k.code == KeyCode::Esc {
-                    return Waited::Cancelled;
-                }
-            }
+        if ui.esc_pressed() {
+            return Waited::Cancelled;
         }
         let now = Instant::now();
-        if deadline_passed(start, timeout, now) {
+        if timeout.is_some_and(|t| deadline_passed(start, t, now)) {
             return Waited::TimedOut;
         }
         if !shown && now.duration_since(first) >= Duration::from_millis(300) {
-            crate::dialogs::progress(app, title, &[title.to_string(), "Esc to cancel".to_string()]);
+            ui.progress(title);
             shown = true;
         }
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
