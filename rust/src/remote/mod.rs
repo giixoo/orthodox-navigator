@@ -61,6 +61,27 @@ pub fn connect(ui: &mut dyn Ui, p: &Profile) -> R<Box<dyn Conn>> {
     }
 }
 
+/// A server file's name as a local file name: on Windows `< > : " / \ | ? *` and control characters
+/// become `_`, trailing dots and spaces go, and device names (CON, NUL, COM1...) get a `_`.
+pub fn local_name(name: &str) -> String {
+    if !cfg!(windows) {
+        return name.replace('/', "_");
+    }
+    let mut s: String = name.chars().map(|c| if c < ' ' || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+    while s.ends_with(['.', ' ']) {
+        s.pop();
+    }
+    let stem = s.split('.').next().unwrap_or("").to_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    if device {
+        s.push('_');
+    }
+    if s.is_empty() {
+        s.push('_');
+    }
+    s
+}
+
 /// `dir` + `name` with one `/` between.
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') {
@@ -117,6 +138,19 @@ pub fn temp_dir() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_names() {
+        assert_eq!(super::local_name("plain.txt"), "plain.txt");
+        if cfg!(windows) {
+            assert_eq!(super::local_name("q\"uote.txt"), "q_uote.txt");
+            assert_eq!(super::local_name("a<b>c:d|e?f*g.txt"), "a_b_c_d_e_f_g.txt");
+            assert_eq!(super::local_name("name. "), "name");
+            assert_eq!(super::local_name("CON"), "CON_");
+        } else {
+            assert_eq!(super::local_name("q\"uote?.txt"), "q\"uote?.txt");
+        }
+    }
+
     #[test]
     fn version_floor() {
         assert!(super::askpass_supported((8, 4)));

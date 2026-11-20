@@ -530,7 +530,7 @@ fn remote_copy(app: &mut App, mv: bool) {
             if c.cancel {
                 break;
             }
-            let dst = if into_dir { full.join(own_name(e)) } else { full.clone() };
+            let dst = if into_dir { full.join(crate::remote::local_name(&own_name(e))) } else { full.clone() };
             if dst.exists() && !e.is_dir && !ask_overwrite(app, &mut c, &dst) {
                 continue;
             }
@@ -574,7 +574,7 @@ fn remote_copy(app: &mut App, mv: bool) {
         let r = if a_rem {
             let tmp = crate::remote::temp_dir().join(format!("xfer-{n}"));
             let _ = fs::create_dir_all(&tmp);
-            let local = tmp.join(&name);
+            let local = tmp.join(crate::remote::local_name(&name));
             let from = rpath(e);
             let mut r = app.with_remote(a, |app, v| v.conn.get(app, &from, &local, e.is_dir));
             if r.is_ok() {

@@ -225,7 +225,7 @@ impl Conn for FtpConn {
         if is_dir {
             std::fs::create_dir_all(local).map_err(|e| format!("{}: {e}", local.display()))?;
             for e in self.list(ui, remote)? {
-                self.get(ui, &crate::remote::join(remote, &e.name), &local.join(&e.name), e.is_dir)?;
+                self.get(ui, &crate::remote::join(remote, &e.name), &local.join(crate::remote::local_name(&e.name)), e.is_dir)?;
             }
             return Ok(());
         }

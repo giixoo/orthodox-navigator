@@ -2179,7 +2179,7 @@ impl App {
     fn remote_fetch(&mut self, i: usize, e: &panel::Entry) -> Option<PathBuf> {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = crate::remote::temp_dir().join(format!("f{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        let local = dir.join(&e.name);
+        let local = dir.join(crate::remote::local_name(&e.name));
         let from = e.path.to_string_lossy().replace('\\', "/");
         let r = fs::create_dir_all(&dir).map_err(|x| x.to_string()).and_then(|_| self.with_remote(i, |app, v| v.conn.get(app, &from, &local, false)));
         match r {

@@ -298,7 +298,7 @@ impl Conn for SftpConn {
         if is_dir {
             std::fs::create_dir_all(local).map_err(|e| format!("{}: {e}", local.display()))?;
             for e in self.list(ui, remote)? {
-                self.get(ui, &crate::remote::join(remote, &e.name), &local.join(&e.name), e.is_dir && !e.is_link)?;
+                self.get(ui, &crate::remote::join(remote, &e.name), &local.join(crate::remote::local_name(&e.name)), e.is_dir && !e.is_link)?;
             }
             return Ok(());
         }
@@ -498,6 +498,12 @@ pub mod tests {
         assert!(!c.list(&mut ui, &join(base, "tree")).unwrap().iter().any(|e| e.name == "tree"));
         c.get(&mut ui, &join(base, "tree"), &tmp.join("back"), true).unwrap();
         assert!(!tmp.join("back/tree").exists());
+
+        // a server name Windows forbids comes down under a local name
+        c.rename(&mut ui, &join(base, "tree/sub/Документ #1.txt"), &join(base, "tree/sub/q\"uote.txt")).unwrap();
+        c.get(&mut ui, &join(base, "tree"), &tmp.join("back2"), true).unwrap();
+        let local = tmp.join("back2/sub").join(crate::remote::local_name("q\"uote.txt"));
+        assert_eq!(std::fs::read_to_string(&local).unwrap(), "hello");
 
         // names with glob characters next to their look-alikes
         let g = join(base, "g");
