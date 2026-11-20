@@ -19,6 +19,7 @@ mod menu;
 mod panel;
 mod platform;
 mod preview;
+mod remote;
 mod rename;
 mod attrs;
 mod colors;
