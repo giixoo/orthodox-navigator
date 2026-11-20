@@ -13,15 +13,34 @@ fn file() -> Option<PathBuf> {
 }
 
 pub fn load() -> Vec<PathBuf> {
-    file().and_then(|f| fs::read_to_string(f).ok()).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect()
+    file().map(|f| load_at(&f)).unwrap_or_default()
 }
 
-pub fn save(list: &[PathBuf]) {
-    let Some(f) = file() else { return };
+fn load_at(f: &std::path::Path) -> Vec<PathBuf> {
+    fs::read_to_string(f).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect()
+}
+
+/// Change the list on disk: read it as it is now (another ON window may have changed it), apply
+/// `change`, write it back. Returns the new list and what `change` returned.
+pub fn update<T>(change: impl FnOnce(&mut Vec<PathBuf>) -> T) -> (Vec<PathBuf>, T) {
+    match file() {
+        Some(f) => update_at(&f, change),
+        None => {
+            let mut l = vec![];
+            let r = change(&mut l);
+            (l, r)
+        }
+    }
+}
+
+pub fn update_at<T>(f: &std::path::Path, change: impl FnOnce(&mut Vec<PathBuf>) -> T) -> (Vec<PathBuf>, T) {
+    let mut list = load_at(f);
+    let r = change(&mut list);
     if let Some(d) = f.parent() {
         let _ = fs::create_dir_all(d);
     }
     let _ = fs::write(f, list.iter().map(|p| format!("{}\n", p.display())).collect::<String>());
+    (list, r)
 }
 
 /// Add paths not on the list yet; returns how many were added.
@@ -66,4 +85,22 @@ pub fn entries(list: &[PathBuf]) -> Vec<Entry> {
 
 pub fn title(n: usize) -> String {
     format!("Temp panel ({n})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_windows_keep_each_others_files() {
+        let f = std::env::temp_dir().join(format!("on-temp-test-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&f);
+        // window A and window B each add a file; neither loses the other's
+        update_at(&f, |l| add(l, &[PathBuf::from("/a/one")]));
+        let (list, _) = update_at(&f, |l| add(l, &[PathBuf::from("/b/two")]));
+        assert_eq!(list, vec![PathBuf::from("/a/one"), PathBuf::from("/b/two")]);
+        let (list, _) = update_at(&f, |l| remove(l, &[PathBuf::from("/a/one")]));
+        assert_eq!(list, vec![PathBuf::from("/b/two")]);
+        let _ = fs::remove_file(&f);
+    }
 }

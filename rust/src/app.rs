@@ -152,6 +152,9 @@ pub struct App {
     last_find: find::Query,
     /// folders visited, newest first (Alt+Backspace)
     dir_hist: Vec<PathBuf>,
+    /// folders this window went to / took off the history, merged into the file on quit
+    hist_added: Vec<PathBuf>,
+    hist_removed: Vec<PathBuf>,
     /// the Temp panel's list
     temp_list: Vec<PathBuf>,
     /// remote connections (remote.txt)
@@ -446,6 +449,8 @@ impl App {
             resume_user: host_relaunch && session.get("user").is_some_and(|v| v == "1"),
             last_find: find::Query { mask: "*".into(), text: String::new() },
             dir_hist: crate::dirhist::load(),
+            hist_added: Vec::new(),
+            hist_removed: Vec::new(),
             temp_list: crate::temp::load(),
             remote_profiles: crate::remote::profiles::load(),
             vault_key: None,
@@ -702,7 +707,8 @@ impl App {
         }
         let _ = fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
         let _ = fs::write(f, out);
-        crate::dirhist::save(&self.dir_hist);
+        // merge with what another ON window may have saved meanwhile
+        crate::dirhist::save(&crate::dirhist::merge(crate::dirhist::load(), &self.hist_added, &self.hist_removed));
     }
 
     /// Everything needed to come back exactly as we were after a command runs in the shell.
@@ -738,6 +744,8 @@ impl App {
         }
         let d = p.dir.clone();
         crate::dirhist::visit(&mut self.dir_hist, &d);
+        self.hist_added.retain(|p| !same_path(p, &d));
+        self.hist_added.push(d.clone());
         self.last_dir.insert(platform::volume_of(&d), d);
         true
     }
@@ -1364,13 +1372,21 @@ impl App {
             Cmd::FolderHistory => {
                 let current = self.panels[self.active].dir.clone();
                 let mut list = std::mem::take(&mut self.dir_hist);
+                let before = list.clone();
                 let pick = crate::dirhist::pick(self, &mut list, &current);
+                // what was deleted in the list stays deleted when the history is merged on quit
+                for gone in before.iter().filter(|p| !list.iter().any(|q| same_path(p, q))) {
+                    self.hist_removed.push(gone.clone());
+                    self.hist_added.retain(|p| !same_path(p, gone));
+                }
                 self.dir_hist = list;
                 if let Some(d) = pick {
                     let i = self.active;
                     if !self.go(i, &d, None) {
                         dialogs::message(self, "Folder history", &format!("{} is not there any more.", d.display()), true);
                         self.dir_hist.retain(|p| !same_path(p, &d));
+                        self.hist_added.retain(|p| !same_path(p, &d));
+                        self.hist_removed.push(d.clone());
                     }
                 }
             }
@@ -1556,8 +1572,8 @@ impl App {
         };
         let current = self.panels[panel].dir.clone();
         let Some(pick) = favorites::pick(self, title, &current) else { return };
-        if let favorites::Pick::Remote(k) = pick {
-            return self.open_remote(panel, k);
+        if let favorites::Pick::Remote(name) = pick {
+            return self.open_remote(panel, &name);
         }
         if matches!(pick, favorites::Pick::Temp) {
             self.show_temp(panel);
@@ -1938,6 +1954,8 @@ impl App {
     /// Show the Temp panel in panel i (keeping the cursor where it was if it already shows it).
     fn show_temp(&mut self, i: usize) {
         self.panels[i].remote = None;
+        // another ON window may have changed it
+        self.temp_list = crate::temp::load();
         let was = self.panels[i].temp.then_some(self.panels[i].cursor);
         let entries = crate::temp::entries(&self.temp_list);
         let p = &mut self.panels[i];
@@ -1948,8 +1966,8 @@ impl App {
         }
     }
 
+    /// Show the (just changed) Temp panel list in the panels that show it.
     fn refresh_temp(&mut self) {
-        crate::temp::save(&self.temp_list);
         for i in 0..self.panels.len() {
             if self.panels[i].temp {
                 self.show_temp(i);
@@ -1967,7 +1985,9 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let n = crate::temp::add(&mut self.temp_list, &paths);
+        // change the list on disk as it is now: another ON window may have added to it
+        let (list, n) = crate::temp::update(|l| crate::temp::add(l, &paths));
+        self.temp_list = list;
         for e in self.active().items.iter_mut() {
             e.selected = false;
         }
@@ -1983,7 +2003,7 @@ impl App {
     fn delete(&mut self, permanent: bool) {
         if self.panels[self.active].temp {
             let paths: Vec<PathBuf> = self.panels[self.active].targets().into_iter().map(|e| e.path).collect();
-            crate::temp::remove(&mut self.temp_list, &paths);
+            self.temp_list = crate::temp::update(|l| crate::temp::remove(l, &paths)).0;
             return self.refresh_temp();
         }
         fileops::delete(self, permanent);
@@ -2225,8 +2245,8 @@ impl App {
     }
 
     /// Connect panel i to profile k (from the drive list).
-    fn open_remote(&mut self, i: usize, k: usize) {
-        match crate::remote::ui::connect(self, k) {
+    fn open_remote(&mut self, i: usize, name: &str) {
+        match crate::remote::ui::connect(self, name) {
             Ok(view) => {
                 let cwd = view.cwd.clone();
                 let p = &mut self.panels[i];
@@ -2248,8 +2268,7 @@ impl App {
 
     /// After a command: connect again and show the folder it showed.
     fn restore_remote(&mut self, i: usize, name: &str, path: &str, focus: Option<&str>) {
-        let Some(k) = self.remote_profiles.list.iter().position(|p| p.name == name) else { return };
-        match crate::remote::ui::connect(self, k) {
+        match crate::remote::ui::connect(self, name) {
             Ok(view) => {
                 self.panels[i].remote = Some(view);
                 if !self.remote_cd(i, path, focus) {

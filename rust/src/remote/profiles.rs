@@ -153,12 +153,21 @@ pub fn load() -> Profiles {
     file().and_then(|f| fs::read_to_string(f).ok()).map(|t| parse(&t)).unwrap_or_default()
 }
 
-pub fn save(p: &Profiles) -> std::io::Result<()> {
+/// Change the profiles on disk: read the file as it is now (another ON window may have changed it),
+/// apply `change`, write it back. Returns what was written.
+pub fn update(change: impl FnOnce(&mut Profiles)) -> std::io::Result<Profiles> {
     let f = file().ok_or_else(|| std::io::Error::other("no config folder"))?;
+    update_at(&f, change)
+}
+
+pub fn update_at(f: &std::path::Path, change: impl FnOnce(&mut Profiles)) -> std::io::Result<Profiles> {
+    let mut p = fs::read_to_string(f).map(|t| parse(&t)).unwrap_or_default();
+    change(&mut p);
     if let Some(d) = f.parent() {
         fs::create_dir_all(d)?;
     }
-    write_private(&f, format(p).as_bytes())
+    write_private(f, format(&p).as_bytes())?;
+    Ok(p)
 }
 
 /// Write a file only the user can read (0600 on Unix; on Windows the user's profile folder already is).
@@ -225,6 +234,28 @@ mod tests {
         assert_eq!(title(&p, "/var/www"), "sftp://deploy@example.org/var/www");
         assert_eq!(title(&sample().list[1], "/"), "ftps://me@10.0.0.5:990/");
         assert_eq!(Proto::parse("ftps-implicit"), Some(Proto::FtpsImplicit));
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_changes() {
+        let f = std::env::temp_dir().join(format!("on-remote-test-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&f);
+        let one = sample().list[0].clone();
+        let mut two = sample().list[1].clone();
+        // window A adds one, window B (which read the file before) adds two: both stay
+        update_at(&f, |p| p.list.push(one.clone())).unwrap();
+        let p = update_at(&f, |p| p.list.push(two.clone())).unwrap();
+        assert_eq!(p.list.len(), 2);
+        // an edit by name keeps the rest
+        two.host = "changed".into();
+        let p = update_at(&f, |p| {
+            if let Some(x) = p.list.iter_mut().find(|x| x.name == two.name) {
+                *x = two.clone();
+            }
+        })
+        .unwrap();
+        assert_eq!((p.list[0].host.as_str(), p.list[1].host.as_str()), ("example.org", "changed"));
+        let _ = fs::remove_file(&f);
     }
 
     #[test]

@@ -25,6 +25,24 @@ pub fn save(list: &[PathBuf]) {
     let _ = fs::write(f, text);
 }
 
+/// The history to save: the file as it is now (another ON window may have added to it), without the
+/// folders this window removed, with this window's visits (oldest first) put on top.
+pub fn merge(disk: Vec<PathBuf>, added: &[PathBuf], removed: &[PathBuf]) -> Vec<PathBuf> {
+    let mut l = disk;
+    l.retain(|p| !removed.iter().any(|r| same_path(p, r)));
+    for a in added {
+        visit(&mut l, a);
+    }
+    l
+}
+
+/// Take one folder off the saved history now.
+fn remove_saved(dir: &Path) {
+    let mut l = load();
+    l.retain(|p| !same_path(p, dir));
+    save(&l);
+}
+
 /// Put `dir` first (once).
 pub fn visit(list: &mut Vec<PathBuf>, dir: &Path) {
     list.retain(|p| !same_path(p, dir));
@@ -54,9 +72,22 @@ pub fn pick(app: &mut crate::app::App, list: &mut Vec<PathBuf>, current: &Path) 
         match p.key {
             KeyCode::Enter => return Some(list[i].clone()),
             _ => {
-                list.remove(i);
-                save(list);
+                let gone = list.remove(i);
+                remove_saved(&gone);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_keeps_other_windows_visits() {
+        let p = |s: &str| PathBuf::from(s);
+        // on disk (another window saved it): a, b; this window visited c then d, and removed b
+        let m = merge(vec![p("/a"), p("/b")], &[p("/c"), p("/d")], &[p("/b")]);
+        assert_eq!(m, vec![p("/d"), p("/c"), p("/a")]);
     }
 }

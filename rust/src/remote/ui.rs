@@ -195,10 +195,13 @@ fn remember_key(app: &mut App, key: Key) {
 
 /// The key for the saved passwords: remembered, from this window's unlock file, or asked (3 tries).
 pub fn unlock_vault(app: &mut App) -> Option<Key> {
-    if let Some(k) = app.vault_key {
-        return Some(k);
-    }
     let v = app.remote_profiles.vault.clone()?;
+    match app.vault_key {
+        Some(k) if vault::unlock_check(&k, &v) => return Some(k),
+        // the master password was changed in another ON window
+        Some(_) => app.vault_key = None,
+        None => {}
+    }
     if let Some(k) = app.unlock_file().and_then(|f| vault::load_key(&f)) {
         if vault::unlock_check(&k, &v) {
             app.vault_key = Some(k);
@@ -218,34 +221,49 @@ pub fn unlock_vault(app: &mut App) -> Option<Key> {
 
 /// The key, making the vault first if there is none yet (asks for a new master password).
 fn vault_for_saving(app: &mut App) -> Option<Key> {
+    // another ON window may have made the vault meanwhile
+    app.remote_profiles = profiles::load();
     if app.remote_profiles.vault.is_some() {
         return unlock_vault(app);
     }
     let m = new_master(app)?;
     let (k, v) = vault::new_vault(&m);
-    app.remote_profiles.vault = Some(v);
+    let mine = v.clone();
+    update_profiles(app, move |p| {
+        if p.vault.is_none() {
+            p.vault = Some(v);
+        }
+    });
+    if app.remote_profiles.vault.as_ref() != Some(&mine) {
+        // made in another window at the same moment: use that one
+        return unlock_vault(app);
+    }
     remember_key(app, k);
     Some(k)
 }
 
-fn save_profiles(app: &mut App) {
-    if let Err(e) = profiles::save(&app.remote_profiles) {
-        dialogs::message(app, "Remote", &format!("Can't save the connections: {e}"), true);
+/// Change the connections file as it is now (another ON window may have changed it).
+fn update_profiles(app: &mut App, change: impl FnOnce(&mut profiles::Profiles)) {
+    match profiles::update(change) {
+        Ok(p) => app.remote_profiles = p,
+        Err(e) => dialogs::message(app, "Remote", &format!("Can't save the connections: {e}"), true),
     }
 }
 
 /// Options → Change master password.
 pub fn change_master(app: &mut App) {
+    app.remote_profiles = profiles::load();
     if app.remote_profiles.vault.is_none() {
         return dialogs::message(app, "Master password", "There are no saved passwords yet.\nThe master password is set when you save the first one.", false);
     }
     let Some(old) = unlock_vault(app) else { return };
     let Some(m) = new_master(app) else { return };
     let (k, v) = vault::new_vault(&m);
-    vault::rekey(&old, &k, &mut app.remote_profiles);
-    app.remote_profiles.vault = Some(v);
+    update_profiles(app, |p| {
+        vault::rekey(&old, &k, p);
+        p.vault = Some(v);
+    });
     remember_key(app, k);
-    save_profiles(app);
     dialogs::message(app, "Master password", "The master password was changed.", false);
 }
 
@@ -255,15 +273,16 @@ pub fn forget_passwords(app: &mut App) {
     if dialogs::choice(app, "Saved passwords", &[q, "They are asked again on the next connection."], &["Forget", "Cancel"], true) != Some(0) {
         return;
     }
-    for p in app.remote_profiles.list.iter_mut() {
-        p.password = None;
-    }
-    app.remote_profiles.vault = None;
+    update_profiles(app, |all| {
+        for p in all.list.iter_mut() {
+            p.password = None;
+        }
+        all.vault = None;
+    });
     app.vault_key = None;
     if let Some(f) = app.unlock_file() {
         let _ = std::fs::remove_file(f);
     }
-    save_profiles(app);
 }
 
 // ------------------------------------------------------------------ ssh's questions
@@ -297,11 +316,12 @@ pub fn answer(app: &mut App, profile: &Profile, prompt: &str) -> Option<String> 
             let (pw, save) = secret(app, &profile.name, &prompt, Some(("Save password", saved.save_password)))?;
             app.typed_passwords.insert(profile.name.clone(), pw.clone());
             let sealed = if save { vault_for_saving(app).map(|k| vault::seal(&k, &pw)) } else { None };
-            if let Some(p) = app.remote_profiles.list.iter_mut().find(|p| p.name == profile.name) {
-                p.save_password = save && sealed.is_some();
-                p.password = sealed;
-            }
-            save_profiles(app);
+            update_profiles(app, |all| {
+                if let Some(p) = all.list.iter_mut().find(|p| p.name == profile.name) {
+                    p.save_password = save && sealed.is_some();
+                    p.password = sealed;
+                }
+            });
             Some(pw)
         }
         PromptKind::Passphrase | PromptKind::Other => secret(app, &profile.name, prompt, None).map(|(s, _)| s),
@@ -361,10 +381,12 @@ pub fn edit_profile(app: &mut App, p: Option<&Profile>, taken: &[String]) -> Opt
     })
 }
 
-/// Connect to profile `idx`. A certificate that can't be verified asks "Connect anyway" once and
-/// remembers the answer in the profile.
-pub fn connect(app: &mut App, idx: usize) -> R<RemoteView> {
-    let mut p = app.remote_profiles.list.get(idx).cloned().ok_or("No such connection.")?;
+/// Connect with the profile of this name. A certificate that can't be verified asks "Connect anyway"
+/// once and remembers the answer in the profile.
+pub fn connect(app: &mut App, name: &str) -> R<RemoteView> {
+    // as it is on disk now (another ON window may have changed it)
+    app.remote_profiles = profiles::load();
+    let mut p = app.remote_profiles.list.iter().find(|p| p.name == name).cloned().ok_or("No such connection.")?;
     app.prompt_count.remove(&p.name);
     let conn = match crate::remote::connect(app, &p) {
         Ok(c) => c,
@@ -374,10 +396,11 @@ pub fn connect(app: &mut App, idx: usize) -> R<RemoteView> {
                 return Err("Cancelled.".into());
             }
             p.insecure = true;
-            if let Some(q) = app.remote_profiles.list.get_mut(idx) {
-                q.insecure = true;
-            }
-            save_profiles(app);
+            update_profiles(app, |all| {
+                if let Some(q) = all.list.iter_mut().find(|q| q.name == p.name) {
+                    q.insecure = true;
+                }
+            });
             app.prompt_count.remove(&p.name);
             crate::remote::connect(app, &p)?
         }
