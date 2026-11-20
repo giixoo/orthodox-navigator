@@ -6,3 +6,4 @@
 
 pub mod listing;
 pub mod profiles;
+pub mod vault;
