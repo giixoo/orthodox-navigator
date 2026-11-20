@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod askpass;
+pub mod ftp;
 pub mod listing;
 pub mod profiles;
 pub mod vault;
@@ -40,7 +41,7 @@ pub trait Conn {
 pub fn connect(ui: &mut dyn Ui, p: &Profile) -> R<Box<dyn Conn>> {
     match p.proto {
         Proto::Sftp => Ok(Box::new(sftp::SftpConn::open(ui, p)?)),
-        _ => Err("FTP is not available yet.".into()),
+        Proto::Ftp | Proto::Ftps | Proto::FtpsImplicit => Ok(Box::new(ftp::FtpConn::open(ui, p)?)),
     }
 }
 

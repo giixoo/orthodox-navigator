@@ -295,7 +295,7 @@ impl Conn for SftpConn {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::remote::profiles::Proto;
     use crate::remote::{join, parent};
