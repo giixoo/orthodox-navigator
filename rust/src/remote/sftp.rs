@@ -129,6 +129,7 @@ impl SftpConn {
             return c;
         }
         let mut c = Command::new("sftp");
+        #[allow(unused_mut)]
         let mut args = sftp_args(&self.profile, self.askpass);
         #[cfg(test)]
         if let Ok(kh) = std::env::var("ON_TEST_KNOWN_HOSTS") {

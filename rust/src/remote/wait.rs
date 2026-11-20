@@ -143,7 +143,7 @@ pub trait Ui {
 
 impl Ui for App {
     fn progress(&mut self, title: &str) {
-        crate::dialogs::progress(self, title, &[title.to_string(), "Esc to cancel".to_string()]);
+        crate::dialogs::progress(self, title, &[title.to_string()]);
     }
 
     fn esc_pressed(&mut self) -> bool {

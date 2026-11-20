@@ -88,6 +88,9 @@ pub enum Cmd {
     EditColors,
     EditExtensions,
     EditGlobalMenu,
+    RemoteConnect,
+    MasterPassword,
+    ForgetPasswords,
 }
 
 /// One thing that happened while a screen was waiting.
@@ -106,6 +109,8 @@ struct PanelInit {
     focus: Option<String>,
     /// it was showing the Temp panel
     temp: bool,
+    /// it was showing a server: (profile name, folder there)
+    remote: Option<(String, String)>,
 }
 
 pub struct App {
@@ -149,6 +154,14 @@ pub struct App {
     dir_hist: Vec<PathBuf>,
     /// the Temp panel's list
     temp_list: Vec<PathBuf>,
+    /// remote connections (remote.txt)
+    pub remote_profiles: crate::remote::profiles::Profiles,
+    /// the key of the saved passwords, once the master password was given
+    pub vault_key: Option<crate::remote::vault::Key>,
+    /// passwords typed this session, by profile name (never written anywhere)
+    pub typed_passwords: HashMap<String, String>,
+    /// password questions so far in the current remote operation, by profile name
+    pub prompt_count: HashMap<String, u32>,
 }
 
 fn state_file() -> Option<PathBuf> {
@@ -386,12 +399,23 @@ impl App {
             };
             let focus = if host_relaunch { src.get(&format!("p{i}.cursor")).cloned() } else { None };
             let temp = host_relaunch && src.get(&format!("p{i}.temp")).is_some_and(|v| v == "1");
+            // a server panel comes back only after a command, never on a fresh start
+            let remote = if host_relaunch { src.get(&format!("p{i}.remote")).map(|r| (r.clone(), src.get(&format!("p{i}.rpath")).cloned().unwrap_or_else(|| "/".into()))) } else { None };
             panels.push(p);
-            init.push(PanelInit { arc, focus, temp });
+            init.push(PanelInit { arc, focus, temp, remote });
         }
         let fracs = parse_fracs(src.get("fracs"), n);
         let active = if host_relaunch { src.get("active").and_then(|v| v.parse().ok()).unwrap_or(0).min(n - 1) } else { 0 };
         let prev = if host_relaunch { src.get("prev").and_then(|v| v.parse().ok()).unwrap_or(0).min(n - 1) } else { 1.min(n - 1) };
+        // the remembered master-password key belongs to this window's session; a fresh start drops it
+        if let Some(sf) = &session_file {
+            if !host_relaunch {
+                let _ = fs::remove_file(crate::remote::vault::unlock_file(sf));
+            }
+            if let Some(d) = sf.parent() {
+                crate::remote::vault::clean_leftovers(d);
+            }
+        }
 
         App {
             screen: Screen::new(),
@@ -423,7 +447,16 @@ impl App {
             last_find: find::Query { mask: "*".into(), text: String::new() },
             dir_hist: crate::dirhist::load(),
             temp_list: crate::temp::load(),
+            remote_profiles: crate::remote::profiles::load(),
+            vault_key: None,
+            typed_passwords: HashMap::new(),
+            prompt_count: HashMap::new(),
         }
+    }
+
+    /// The file that keeps the master-password key between restarts (only inside the shell wrapper).
+    pub fn unlock_file(&self) -> Option<PathBuf> {
+        self.session_file.as_deref().map(crate::remote::vault::unlock_file)
     }
 
     // ------------------------------------------------------------- panels
@@ -587,6 +620,9 @@ impl App {
                     self.panels[i].archive_cd(&prefix, pi.focus.as_deref());
                 }
             }
+            if let Some((name, path)) = pi.remote {
+                self.restore_remote(i, &name, &path, pi.focus.as_deref());
+            }
             if pi.temp {
                 self.show_temp(i);
                 if let Some(f) = &pi.focus {
@@ -621,6 +657,18 @@ impl App {
         self.save_state();
         if self.action_file.is_some() {
             self.save_session();
+        }
+        // leaving ON for good (not just for a command): forget the master password and close servers
+        if self.pending_run.is_none() {
+            if let Some(f) = self.unlock_file() {
+                let _ = fs::remove_file(f);
+            }
+            for p in self.panels.iter_mut() {
+                if let Some(mut r) = p.remote.take() {
+                    r.conn.close();
+                }
+            }
+            let _ = fs::remove_dir_all(crate::remote::temp_dir());
         }
         if let Some(f) = self.cwd_file.clone() {
             let dir = self.active().dir.to_string_lossy().to_string();
@@ -669,6 +717,7 @@ impl App {
             if p.temp {
                 out += &format!("p{i}.temp=1\n");
             }
+            out += &remote_session_lines(i, p);
         }
         let _ = fs::write(f, out);
     }
@@ -1219,6 +1268,9 @@ impl App {
     }
 
     pub fn run_cmd(&mut self, c: Cmd) {
+        if self.panels[self.active].remote.is_some() && blocked_on_remote(&c) {
+            return dialogs::message(self, "Remote", "Not available in a remote panel.", false);
+        }
         match c {
             Cmd::ToggleView => self.active().toggle_view(),
             Cmd::Sort(m) => self.active().set_sort(m),
@@ -1226,9 +1278,11 @@ impl App {
                 let p = self.active();
                 p.show_hidden = !p.show_hidden;
                 p.load(None);
+                self.remote_reread(self.active);
             }
             Cmd::Reread => {
                 self.active().load(None);
+                self.remote_reread(self.active);
                 if let Some(p) = self.preview.as_mut() {
                     p.forget();
                 }
@@ -1338,6 +1392,9 @@ impl App {
             }
             Cmd::EditExtensions => crate::usermenu::edit_extensions(self),
             Cmd::EditGlobalMenu => crate::usermenu::edit_global(self),
+            Cmd::RemoteConnect => self.change_drive(self.active),
+            Cmd::MasterPassword => crate::remote::ui::change_master(self),
+            Cmd::ForgetPasswords => crate::remote::ui::forget_passwords(self),
             Cmd::Tools => {
                 let file = self.panels[self.active].current().filter(|e| !e.is_dir && !e.is_up).map(|e| e.path.clone());
                 let dir = self.panels[self.active].dir.clone();
@@ -1377,6 +1434,9 @@ impl App {
 
     fn open(&mut self, e: panel::Entry) {
         let i = self.active;
+        if self.panels[i].remote.is_some() {
+            return self.remote_open(i, e);
+        }
         if self.panels[i].arc.is_some() {
             if e.is_up {
                 self.panels[i].archive_up();
@@ -1445,6 +1505,12 @@ impl App {
 
     fn go_parent(&mut self) {
         let i = self.active;
+        if self.panels[i].remote.is_some() {
+            if let Some(up) = self.panels[i].items.first().filter(|e| e.is_up).cloned() {
+                return self.remote_open(i, up);
+            }
+            return;
+        }
         if self.panels[i].arc.is_some() {
             return self.panels[i].archive_up();
         }
@@ -1474,12 +1540,15 @@ impl App {
         };
         let current = self.panels[panel].dir.clone();
         let Some(pick) = favorites::pick(self, title, &current) else { return };
+        if let favorites::Pick::Remote(k) = pick {
+            return self.open_remote(panel, k);
+        }
         if matches!(pick, favorites::Pick::Temp) {
             self.show_temp(panel);
             return self.set_active(panel);
         }
         let (target, shown) = match pick {
-            favorites::Pick::Temp => return,
+            favorites::Pick::Temp | favorites::Pick::Remote(_) => return,
             favorites::Pick::Volume(root) if root != platform::home() => {
                 let t = self.last_dir.get(&platform::volume_of(&root)).filter(|p| p.is_dir()).cloned().unwrap_or(root.clone());
                 (t, root)
@@ -1822,6 +1891,7 @@ impl App {
 
     /// Show the Temp panel in panel i (keeping the cursor where it was if it already shows it).
     fn show_temp(&mut self, i: usize) {
+        self.panels[i].remote = None;
         let was = self.panels[i].temp.then_some(self.panels[i].cursor);
         let entries = crate::temp::entries(&self.temp_list);
         let p = &mut self.panels[i];
@@ -1897,6 +1967,10 @@ impl App {
 
     fn execute(&mut self, text: &str) {
         let t = text.trim();
+        if self.panels[self.active].remote.is_some() {
+            self.cmd.set(text);
+            return dialogs::message(self, "Remote", "Commands don't run in a remote panel.\nSwitch to a local panel (Tab) to run them.", false);
+        }
         self.add_history(t);
         match self.builtin(t) {
             Some(Err(e)) => dialogs::message(self, "Error", &e, true),
@@ -1980,5 +2054,159 @@ impl App {
         for p in self.panels.iter_mut() {
             p.load(None);
         }
+    }
+}
+
+/// Commands that need local files: not in a remote panel.
+fn blocked_on_remote(c: &Cmd) -> bool {
+    matches!(
+        c,
+        Cmd::UserMenu
+            | Cmd::Find
+            | Cmd::Attributes
+            | Cmd::Filter
+            | Cmd::FolderSizes
+            | Cmd::AddToTemp
+            | Cmd::BatchRename
+            | Cmd::GitDiff
+            | Cmd::Tools
+            | Cmd::Compare
+            | Cmd::CompareFiles
+            | Cmd::NewFile
+            | Cmd::AddFavorite
+    )
+}
+
+/// The session lines for a panel showing a server.
+fn remote_session_lines(i: usize, p: &Panel) -> String {
+    match &p.remote {
+        Some(r) => format!("p{i}.remote={}\np{i}.rpath={}\n", r.profile, r.cwd),
+        None => String::new(),
+    }
+}
+
+// ------------------------------------------------------------------ remote panels
+
+impl App {
+    /// Show folder `path` of the server in panel i. False (after a message) when it can't be read.
+    pub fn remote_cd(&mut self, i: usize, path: &str, focus: Option<&str>) -> bool {
+        let Some(mut view) = self.panels[i].remote.take() else { return false };
+        self.prompt_count.remove(&view.profile);
+        let r = view.conn.list(self, path);
+        let ok = match r {
+            Ok(list) => {
+                view.cwd = path.to_string();
+                self.panels[i].remote = Some(view);
+                self.panels[i].set_remote_items(path, list, focus);
+                return true;
+            }
+            Err(e) => e,
+        };
+        self.panels[i].remote = Some(view);
+        if ok != "Cancelled." {
+            dialogs::message(self, "Remote", &ok, true);
+        }
+        false
+    }
+
+    fn remote_reread(&mut self, i: usize) {
+        let Some(cwd) = self.panels[i].remote.as_ref().map(|r| r.cwd.clone()) else { return };
+        let focus = self.panels[i].current().map(|e| e.name.clone());
+        self.remote_cd(i, &cwd, focus.as_deref());
+    }
+
+    /// Back to the local folder the panel showed before.
+    fn leave_remote(&mut self, i: usize) {
+        if let Some(mut r) = self.panels[i].remote.take() {
+            r.conn.close();
+        }
+        self.panels[i].items.clear();
+        self.panels[i].load(None);
+    }
+
+    /// Connect panel i to profile k (from the drive list).
+    fn open_remote(&mut self, i: usize, k: usize) {
+        match crate::remote::ui::connect(self, k) {
+            Ok(view) => {
+                let cwd = view.cwd.clone();
+                let p = &mut self.panels[i];
+                p.arc = None;
+                p.found = None;
+                p.temp = false;
+                p.filter = None;
+                p.items.clear();
+                p.remote = Some(view);
+                self.set_active(i);
+                if !self.remote_cd(i, &cwd, None) && !(cwd != "/" && self.remote_cd(i, "/", None)) {
+                    self.leave_remote(i);
+                }
+            }
+            Err(e) if e == "Cancelled." => {}
+            Err(e) => dialogs::message(self, "Remote", &e, true),
+        }
+    }
+
+    /// After a command: connect again and show the folder it showed.
+    fn restore_remote(&mut self, i: usize, name: &str, path: &str, focus: Option<&str>) {
+        let Some(k) = self.remote_profiles.list.iter().position(|p| p.name == name) else { return };
+        match crate::remote::ui::connect(self, k) {
+            Ok(view) => {
+                self.panels[i].remote = Some(view);
+                if !self.remote_cd(i, path, focus) {
+                    self.leave_remote(i);
+                }
+            }
+            Err(e) if e == "Cancelled." => {}
+            Err(e) => dialogs::message(self, "Remote", &e, true),
+        }
+    }
+
+    /// Enter / double click in a remote panel.
+    fn remote_open(&mut self, i: usize, e: panel::Entry) {
+        let path = e.path.to_string_lossy().replace('\\', "/");
+        if e.is_up {
+            let cwd = self.panels[i].remote.as_ref().map(|r| r.cwd.clone()).unwrap_or_default();
+            match crate::remote::parent(&cwd) {
+                Some((up, name)) => {
+                    self.remote_cd(i, &up, Some(&name));
+                }
+                None => self.leave_remote(i),
+            }
+            return;
+        }
+        // a link may lead to a folder: try to enter it first
+        if (e.is_dir || e.is_link) && (self.remote_cd(i, &path, None) || e.is_dir) {
+            return;
+        }
+        dialogs::message(self, "Remote", "Opening files on a server comes in the next step.", false);
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::remote::listing::RemoteEntry;
+    use crate::remote::wait::Ui;
+    use crate::remote::{Conn, RemoteView, R};
+
+    struct NoConn;
+    impl Conn for NoConn {
+        fn home(&mut self, _: &mut dyn Ui) -> R<String> { Ok("/".into()) }
+        fn list(&mut self, _: &mut dyn Ui, _: &str) -> R<Vec<RemoteEntry>> { Ok(vec![]) }
+        fn get(&mut self, _: &mut dyn Ui, _: &str, _: &Path, _: bool) -> R<()> { Ok(()) }
+        fn put(&mut self, _: &mut dyn Ui, _: &Path, _: &str, _: bool) -> R<()> { Ok(()) }
+        fn mkdir(&mut self, _: &mut dyn Ui, _: &str) -> R<()> { Ok(()) }
+        fn remove(&mut self, _: &mut dyn Ui, _: &str, _: bool) -> R<()> { Ok(()) }
+        fn rename(&mut self, _: &mut dyn Ui, _: &str, _: &str) -> R<()> { Ok(()) }
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn session_keeps_remote_panels() {
+        let mut p = Panel::new(std::env::temp_dir());
+        assert_eq!(remote_session_lines(0, &p), "");
+        p.remote = Some(RemoteView { profile: "Work".into(), cwd: "/var/www".into(), conn: Box::new(NoConn), base: "sftp://h".into() });
+        assert_eq!(remote_session_lines(1, &p), "p1.remote=Work\np1.rpath=/var/www\n");
+        assert_eq!(p.title_path(), "sftp://h/var/www");
     }
 }

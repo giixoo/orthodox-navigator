@@ -1,7 +1,7 @@
 //! Remote panels: folders on other machines over SFTP (the system `sftp`) and FTP / FTPS (the system
 //! `curl`). See docs/superpowers/specs/2026-11-19-remote-panels-design.md.
 
-// Parts are wired into the panels step by step; remove once all of it is used (plan Task 8).
+// File operations on remote panels come in plan Task 9; remove this then.
 #![allow(dead_code)]
 
 pub mod askpass;
@@ -10,6 +10,7 @@ pub mod listing;
 pub mod profiles;
 pub mod vault;
 pub mod sftp;
+pub mod ui;
 pub mod wait;
 
 use crate::app::App;
@@ -35,6 +36,23 @@ pub trait Conn {
     fn remove(&mut self, ui: &mut dyn Ui, path: &str, is_dir: bool) -> R<()>;
     fn rename(&mut self, ui: &mut dyn Ui, from: &str, to: &str) -> R<()>;
     fn close(&mut self);
+}
+
+/// A panel showing a folder on a server.
+pub struct RemoteView {
+    /// the profile's name
+    pub profile: String,
+    /// the folder shown, a path on the server
+    pub cwd: String,
+    pub conn: Box<dyn Conn>,
+    /// "sftp://user@host:port" (the folder is added for the title)
+    pub base: String,
+}
+
+impl RemoteView {
+    pub fn title(&self) -> String {
+        format!("{}{}", self.base, if self.cwd.starts_with('/') { self.cwd.clone() } else { format!("/{}", self.cwd) })
+    }
 }
 
 /// Connect with a profile.
@@ -89,10 +107,14 @@ pub fn openssh() -> R<(u32, u32)> {
     parse_ssh_version(&text).ok_or_else(|| format!("Unknown ssh version: {}", text.trim()))
 }
 
-/// Answer a question from ssh (password, passphrase, "trust this host?") for a profile. The dialogs
-/// come with the panel integration; until then nothing is answered.
-pub fn answer_prompt(_app: &mut App, _profile: &Profile, _prompt: &str) -> Option<String> {
-    None
+/// Answer a question from ssh (password, passphrase, "trust this host?") for a profile.
+pub fn answer_prompt(app: &mut App, profile: &Profile, prompt: &str) -> Option<String> {
+    ui::answer(app, profile, prompt)
+}
+
+/// Where remote files are downloaded to view or edit them (removed when ON quits for good).
+pub fn temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("on-remote-{}", std::process::id()))
 }
 
 #[cfg(test)]

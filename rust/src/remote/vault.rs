@@ -43,6 +43,11 @@ pub fn unlock(master: &str, vault: &(String, String)) -> Option<Key> {
     (open(&key, &vault.1).as_deref() == Some(CHECK)).then_some(key)
 }
 
+/// Does this key open the vault's check value? (a key read back from an unlock file)
+pub fn unlock_check(key: &Key, vault: &(String, String)) -> bool {
+    open(key, &vault.1).as_deref() == Some(CHECK)
+}
+
 /// Encrypt: base64(nonce ‖ ciphertext).
 pub fn seal(key: &Key, plain: &str) -> String {
     let nonce: [u8; 12] = random();
@@ -158,6 +163,8 @@ mod tests {
         assert_ne!(s, seal(&key, "p@ss wörd")); // a fresh nonce each time
         assert_eq!(open(&key, &s).as_deref(), Some("p@ss wörd"));
         assert_eq!(unlock("correct horse", &vault), Some(key));
+        assert!(unlock_check(&key, &vault));
+        assert!(!unlock_check(&[0u8; 32], &vault));
     }
 
     #[test]

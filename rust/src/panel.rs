@@ -99,6 +99,8 @@ pub struct Panel {
     pub temp: bool,
     /// Ctrl+F: show only files matching these masks (`-mask` hides); folders are always shown.
     pub filter: Option<String>,
+    /// Showing a folder on a server (SFTP / FTP); `dir` keeps the local folder it came from.
+    pub remote: Option<crate::remote::RemoteView>,
 }
 
 /// Narrowest a name column may get, in characters.
@@ -188,6 +190,7 @@ impl Panel {
             found: None,
             temp: false,
             filter: None,
+            remote: None,
         }
     }
 
@@ -223,6 +226,7 @@ impl Panel {
         self.arc = None;
         self.found = None;
         self.temp = false;
+        self.remote = None;
         self.dir = full;
         self.items.clear();
         self.top = 0;
@@ -236,6 +240,10 @@ impl Panel {
         let keep: HashSet<String> = self.items.iter().filter(|e| e.selected).map(|e| e.name.to_lowercase()).collect();
         let mut list = Vec::new();
         self.error = None;
+        if self.remote.is_some() {
+            // the app reads remote folders (it needs dialogs): App::remote_cd
+            return;
+        }
         if self.arc.is_some() {
             self.load_archive(focus, &keep);
             return;
@@ -437,6 +445,53 @@ impl Panel {
         self.clamp();
     }
 
+    /// Show a folder on a server: `cwd` is its path there, `list` what it holds.
+    pub fn set_remote_items(&mut self, cwd: &str, list: Vec<crate::remote::listing::RemoteEntry>, focus: Option<&str>) {
+        let keep: HashSet<String> = self.items.iter().filter(|e| e.selected).map(|e| e.name.clone()).collect();
+        let up = crate::remote::parent(cwd).map(|(p, _)| p);
+        let mut items = vec![Entry {
+            name: "..".into(),
+            path: up.map(PathBuf::from).unwrap_or_else(|| self.dir.clone()),
+            is_dir: true,
+            is_up: true,
+            is_link: false,
+            selected: false,
+            size: None,
+            modified: None,
+            hidden: false,
+            exec: false,
+            arc: None,
+        }];
+        for r in list {
+            if r.hidden && !self.show_hidden {
+                continue;
+            }
+            items.push(Entry {
+                path: PathBuf::from(crate::remote::join(cwd, &r.name)),
+                selected: keep.contains(&r.name),
+                is_dir: r.is_dir,
+                is_up: false,
+                is_link: r.is_link,
+                size: r.size,
+                modified: r.modified,
+                hidden: r.hidden,
+                exec: r.exec,
+                arc: None,
+                name: r.name,
+            });
+        }
+        self.error = None;
+        self.git.clear();
+        self.branch = None;
+        self.free = None;
+        self.volume = String::new();
+        self.items = items;
+        self.apply_sort();
+        self.top = 0;
+        self.cursor = focus.and_then(|f| self.items.iter().position(|e| e.name == f)).unwrap_or(0);
+        self.clamp();
+    }
+
     /// Leave search results, back to the folder.
     pub fn close_results(&mut self) {
         self.found = None;
@@ -447,6 +502,9 @@ impl Panel {
     pub fn title_path(&self) -> String {
         if let Some(f) = &self.found {
             return f.clone();
+        }
+        if let Some(r) = &self.remote {
+            return r.title();
         }
         match &self.arc {
             Some(av) => {
@@ -900,5 +958,29 @@ mod select_tests {
         p.select_by(1, false); // at the last file: toggles it
         assert_eq!(names(&p), ["e"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::listing::RemoteEntry;
+
+    fn re(name: &str, is_dir: bool) -> RemoteEntry {
+        RemoteEntry { name: name.into(), is_dir, is_link: false, size: (!is_dir).then_some(1), modified: None, hidden: name.starts_with('.'), exec: false }
+    }
+
+    #[test]
+    fn remote_items() {
+        let mut p = Panel::new(std::env::temp_dir());
+        p.show_hidden = false;
+        p.set_remote_items("/srv/www", vec![re("b.txt", false), re("sub", true), re(".env", false), re("a.txt", false)], Some("b.txt"));
+        let names: Vec<&str> = p.items.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["..", "sub", "a.txt", "b.txt"]);
+        assert_eq!(p.current().unwrap().name, "b.txt");
+        assert_eq!(p.items[1].path, PathBuf::from("/srv/www/sub"));
+        assert!(p.items[0].is_up);
+        // the panel's own folder stays the local one it came from
+        assert_eq!(p.dir, normalize(&std::env::temp_dir()));
     }
 }

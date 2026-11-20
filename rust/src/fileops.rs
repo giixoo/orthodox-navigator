@@ -37,6 +37,9 @@ pub fn read_only(app: &mut App) {
 }
 
 pub fn copy_or_move(app: &mut App, mv: bool) {
+    if app.active().remote.is_some() || app.passive().remote.is_some() {
+        return dialogs::message(app, "Remote", "Copying to and from servers comes in the next step.", false);
+    }
     if app.active().arc.is_some() {
         if mv { read_only(app) } else { extract_out(app) }
         return;
@@ -183,6 +186,9 @@ fn move_entry(app: &mut App, c: &mut Ctx, src: &Path, dst: &Path, is_dir: bool) 
 }
 
 pub fn delete(app: &mut App, permanent: bool) {
+    if app.active().remote.is_some() {
+        return dialogs::message(app, "Remote", "Deleting on servers comes in the next step.", false);
+    }
     if app.active().arc.is_some() {
         return read_only(app);
     }
